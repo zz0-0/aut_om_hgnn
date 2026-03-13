@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "om_hgnn"
+version = "0.1.0"
+description = "Reimplementation / research of MI-HGNN for OM"
+authors = [
+  { name = "<your name>", email = "you@example.com" }
+]
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=2.0",
+  "torch>=2.6.0",
+  "torchvision>=0.21.0",
+  "torchaudio>=2.6.0",
+  "torch-geometric>=2.6.1",
+  "lightning>=2.4.0",
+  "pytorch-lightning>=2.6.0",
+  "tensorboard>=2.20.0",
+  "torchmetrics>=1.5.2",
+  "networkx>=3.6.1",
+  "pillow>=12.0.0",
+  "requests>=2.32.5",
+  "PyYAML>=6.0.3",
+  "tqdm>=4.67.1",
+  "xxhash>=3.6.0",
+  "usd-core>=25.11",
+  "typing_extensions>=4.15.0"
+]
+
+[project.optional-dependencies]
+# Add dev tools here if you want, e.g. pytest, black, ruff
+# dev = ["pytest", "black", "ruff"]
