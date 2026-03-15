@@ -44,6 +44,9 @@ from src.model.architecture.base_model import BaseModel
 from src.model.training.base_lit_model import BaseLitModel
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 def main():
     """
     Orchestrate the full training pipeline.
@@ -58,6 +61,8 @@ def main():
     # User provides: config path, optional W&B settings, etc.
     args = parse_args()
     logger = setup_logging()
+
+    torch.set_float32_matmul_precision("high")
 
     # Set global RNG seeds for reproducible multi-seed experiments.
     seed_everything(args.seed, workers=True)
@@ -346,6 +351,7 @@ def main():
     config_stem = Path(args.config_path).stem
     default_run_name = f"{config_stem}_seed{args.seed:02d}"
     run_name = args.run_name or default_run_name
+    wandb_save_dir = (PROJECT_ROOT / "wandb_logs").resolve()
     wandb_logger: Logger = WandbLogger(
         project=args.wandb_project,
         entity=args.wandb_entity,
@@ -353,11 +359,14 @@ def main():
         group=args.wandb_group,
         id=args.wandb_run_id,
         resume=args.wandb_resume,
-        save_dir="wandb_logs",
-        log_model=True,
+        save_dir=str(wandb_save_dir),
+        log_model=False,
     )
 
-    checkpoint_dir = Path(args.checkpoint_dir) / run_name
+    checkpoint_root = Path(args.checkpoint_dir)
+    if not checkpoint_root.is_absolute():
+        checkpoint_root = (PROJECT_ROOT / checkpoint_root).resolve()
+    checkpoint_dir = checkpoint_root / run_name
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     callbacks: list[Callback] = [
@@ -377,7 +386,6 @@ def main():
         accelerator=accelerator,
         devices=devices,
         precision=precision,
-        deterministic=True,
         gradient_clip_val=train_config.gradient_clip_val,
         gradient_clip_algorithm=train_config.gradient_clip_algorithm,
         logger=wandb_logger,
@@ -471,7 +479,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoint-dir",
         type=str,
-        default="checkpoints",
+        default=str(PROJECT_ROOT / "checkpoints"),
         help="Root directory where checkpoints are written (subfolder uses run name)",
     )
     parser.add_argument(

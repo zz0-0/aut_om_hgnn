@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import copy
 from typing import Optional, Self
 
 from torch import nn
@@ -273,6 +274,40 @@ class WeightAndAreaNormalizedMetric(Metric):
         self.base_metric.reset()
 
 
+class StreamingCosineSimilarity(Metric):
+    """Mean cosine similarity with constant-size running state.
+
+    TorchMetrics' built-in CosineSimilarity stores per-batch prediction/target
+    tensors until compute(), which causes runtime and memory to grow over long
+    epochs. This implementation accumulates only sum and count.
+    """
+
+    full_state_update = False
+
+    def __init__(self):
+        super().__init__()
+        self.add_state("sum_cos", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
+        if preds.shape != target.shape:
+            raise ValueError(
+                f"Prediction/target shape mismatch for StreamingCosineSimilarity: "
+                f"{tuple(preds.shape)} != {tuple(target.shape)}"
+            )
+
+        preds_flat = preds.reshape(-1, preds.shape[-1]).float()
+        target_flat = target.reshape(-1, target.shape[-1]).float()
+        cos = torch.nn.functional.cosine_similarity(preds_flat, target_flat, dim=-1)
+        self.sum_cos += cos.sum().to(self.sum_cos.device)
+        self.count += torch.tensor(cos.numel(), device=self.count.device)
+
+    def compute(self) -> torch.Tensor:
+        if int(self.count.item()) == 0:
+            return torch.tensor(0.0, device=self.sum_cos.device)
+        return self.sum_cos / self.count
+
+
 class BaseSpec(ABC):
     """
     Abstract specification that defines the graph schema.
@@ -531,7 +566,12 @@ class BaseSpec(ABC):
                     torchmetrics.MatthewsCorrCoef(task="binary"), foot_idx, num_feet
                 )
 
-            return {stage: base_metrics.copy() for stage in Stage}
+            return {
+                stage: {
+                    name: copy.deepcopy(metric) for name, metric in base_metrics.items()
+                }
+                for stage in Stage
+            }
         elif output_type == OutputType.GROUND_REACTION_FORCE:
             # Create both aggregate metrics and per-axis metrics
             # Also create weight-normalized versions if robot_mass is provided
@@ -678,7 +718,12 @@ class BaseSpec(ABC):
                         )
                     )
 
-            return {stage: base_metrics.copy() for stage in Stage}
+            return {
+                stage: {
+                    name: copy.deepcopy(metric) for name, metric in base_metrics.items()
+                }
+                for stage in Stage
+            }
 
         elif output_type == OutputType.CENTER_OF_MASS:
             # Create both aggregate metrics and per-component (linear/angular) metrics
@@ -689,7 +734,7 @@ class BaseSpec(ABC):
             base_metrics["mse"] = torchmetrics.MeanSquaredError()
             base_metrics["rmse"] = torchmetrics.MeanSquaredError(squared=False)
             base_metrics["r2_score"] = torchmetrics.R2Score()
-            base_metrics["cos_sim"] = torchmetrics.CosineSimilarity(reduction="mean")
+            base_metrics["cos_sim"] = StreamingCosineSimilarity()
 
             # Per-component metrics
             for component in ["linear", "angular"]:
@@ -706,10 +751,15 @@ class BaseSpec(ABC):
                     torchmetrics.R2Score(), component
                 )
                 base_metrics[f"cos_sim_{component}"] = ComponentMetric(
-                    torchmetrics.CosineSimilarity(reduction="mean"), component
+                    StreamingCosineSimilarity(), component
                 )
 
-            return {stage: base_metrics.copy() for stage in Stage}
+            return {
+                stage: {
+                    name: copy.deepcopy(metric) for name, metric in base_metrics.items()
+                }
+                for stage in Stage
+            }
 
         else:
             raise ValueError(f"Unknown output type: {output_type}")

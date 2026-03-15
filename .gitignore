@@ -37,3 +37,7 @@ htmlcov/
 # OS-specific files (optional)
 .DS_Store
 Thumbs.db
+
+datasets_memmap/
+checkpoints/
+wandb_logs/

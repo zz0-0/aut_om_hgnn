@@ -18,6 +18,9 @@ import time
 from typing import Any, Dict, List, Tuple
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run src.train over all configs and seeds"
@@ -58,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-root",
         type=str,
-        default="checkpoints",
+        default=str(PROJECT_ROOT / "checkpoints"),
         help="Root directory for all checkpoints and state",
     )
     parser.add_argument(
@@ -140,6 +143,8 @@ def main() -> None:
     args = parse_args()
 
     config_dir = Path(args.config_dir)
+    if not config_dir.is_absolute():
+        config_dir = (PROJECT_ROOT / config_dir).resolve()
     config_paths = sorted(config_dir.glob(args.pattern))
     if args.limit_configs > 0:
         config_paths = config_paths[: args.limit_configs]
@@ -150,6 +155,8 @@ def main() -> None:
 
     super_slug = _safe_slug(args.wandb_supergroup)
     checkpoint_root = Path(args.checkpoint_root)
+    if not checkpoint_root.is_absolute():
+        checkpoint_root = (PROJECT_ROOT / checkpoint_root).resolve()
     default_state = checkpoint_root / super_slug / "all_configs_multiseed_state.json"
     state_path = Path(args.state_file) if args.state_file else default_state
     state = _load_state(state_path)
@@ -158,6 +165,7 @@ def main() -> None:
     python_exe = Path(sys.executable)
     env = os.environ.copy()
     env.setdefault("WANDB_MODE", "online")
+    env.setdefault("WANDB_DIR", str(PROJECT_ROOT / "wandb_logs"))
 
     total_pairs = len(config_paths) * len(args.seeds)
 
