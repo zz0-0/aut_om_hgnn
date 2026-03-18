@@ -101,6 +101,13 @@ def _safe_slug(text: str) -> str:
     return slug[:120] if slug else "run"
 
 
+def _resolve_python_executable() -> Path:
+    venv_python = PROJECT_ROOT / ".venv" / "bin" / "python"
+    if venv_python.exists():
+        return venv_python
+    return Path(sys.executable)
+
+
 def _load_state(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {"runs": {}}
@@ -162,7 +169,7 @@ def main() -> None:
     state = _load_state(state_path)
     state.setdefault("runs", {})
 
-    python_exe = Path(sys.executable)
+    python_exe = _resolve_python_executable()
     env = os.environ.copy()
     env.setdefault("WANDB_MODE", "online")
     env.setdefault("WANDB_DIR", str(PROJECT_ROOT / "wandb_logs"))

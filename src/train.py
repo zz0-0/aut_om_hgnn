@@ -362,6 +362,13 @@ def main():
         save_dir=str(wandb_save_dir),
         log_model=False,
     )
+    wandb_experiment = wandb_logger.experiment
+    wandb_experiment.define_metric("epoch")
+    wandb_experiment.define_metric("trainer/global_step")
+    wandb_experiment.define_metric("live_train/*", step_metric="trainer/global_step")
+    wandb_experiment.define_metric("train_*", step_metric="epoch")
+    wandb_experiment.define_metric("val_*", step_metric="epoch")
+    wandb_experiment.define_metric("test_*", step_metric="epoch")
 
     checkpoint_root = Path(args.checkpoint_dir)
     if not checkpoint_root.is_absolute():

@@ -94,44 +94,6 @@ class MI_HGNN_LitModel(BaseLitModel):
         target_key = f"y_{self.output_type.value.lower()}"
         return batch[target_key]
 
-    def _update_metrics(
-        self, stage: Stage, pred: torch.Tensor, target: torch.Tensor
-    ) -> None:
-        if self.output_type not in self.metrics:
-            return
-
-        metrics = self.metrics[self.output_type][stage]
-        for metric_name, metric in metrics.items():
-            metric = metric.to(pred.device)
-            metrics[metric_name] = metric
-            try:
-                metric.update(pred, target)  # type: ignore[arg-type]
-            except (RuntimeError, ValueError):
-                # Do not let a single metric abort the whole training step.
-                continue
-
-    def _log_epoch_metrics(self, stage: Stage) -> None:
-        if self.output_type not in self.metrics:
-            return
-
-        metrics = self.metrics[self.output_type][stage]
-        for metric_name, metric in metrics.items():
-            try:
-                metric_value = metric.compute()
-            except (RuntimeError, ValueError):
-                # Some metrics (e.g., R2) require sufficient valid samples.
-                # Skip logging for this epoch if not enough data was accumulated.
-                metric.reset()
-                continue
-
-            self.log(
-                f"{stage.value}_{self.output_type.value.lower()}_{metric_name}",
-                metric_value,
-                on_step=False,
-                on_epoch=True,
-            )
-            metric.reset()
-
     def _compute_loss_and_metrics(
         self, batch: HeteroDataBatch, stage: Stage
     ) -> torch.Tensor:
@@ -183,23 +145,35 @@ class MI_HGNN_LitModel(BaseLitModel):
             )
         total_loss += loss
 
-        # Log loss
+        stage_str = stage.value
         self.log(
-            f"{stage.value}_loss_{output_type.value.lower()}",
+            f"{stage_str}_loss_{output_type.value.lower()}",
             loss,
             prog_bar=True,
             batch_size=batch_size,
         )
 
-        self._update_metrics(stage, pred.detach().float(), target.detach().float())
+        if self.output_type in self.metrics:
+            metrics = self.metrics[self.output_type][stage]
+            pred_detached = pred.detach().float()
+            target_detached = target.detach().float()
+            for metric_name, metric in metrics.items():
+                metric = metric.to(pred_detached.device)
+                metrics[metric_name] = metric
+                try:
+                    metric.update(pred_detached, target_detached)  # type: ignore[arg-type]
+                    metric_value = metric.compute()
+                    self.log(
+                        f"{stage_str}_{output_type.value.lower()}_{metric_name}",
+                        metric_value,
+                        batch_size=batch_size,
+                    )
+                except (RuntimeError, ValueError):
+                    continue
+                finally:
+                    metric.reset()
 
-        # Log total loss
-        self.log(
-            f"{stage.value}_total_loss",
-            total_loss,
-            prog_bar=True,
-            batch_size=batch_size,
-        )
+        self.log(f"{stage_str}_total_loss", total_loss, batch_size=batch_size)
 
         return total_loss
 
@@ -243,15 +217,6 @@ class MI_HGNN_LitModel(BaseLitModel):
         - Loss scalar
         """
         return self._compute_loss_and_metrics(batch, Stage.TEST)
-
-    def on_train_epoch_end(self) -> None:
-        self._log_epoch_metrics(Stage.TRAIN)
-
-    def on_validation_epoch_end(self) -> None:
-        self._log_epoch_metrics(Stage.VAL)
-
-    def on_test_epoch_end(self) -> None:
-        self._log_epoch_metrics(Stage.TEST)
 
     def configure_optimizers(self):
         """
