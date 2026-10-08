@@ -41,3 +41,10 @@ Thumbs.db
 datasets_memmap/
 checkpoints/
 wandb_logs/
+# Evaluation artifacts: keep summary tables and online JSONs only
+evaluation/*
+!evaluation/summary/
+!evaluation/online/
+evaluation/online/*.log
+
+datasets_memmap

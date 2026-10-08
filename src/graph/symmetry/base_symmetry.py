@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import random
 from typing import Any, Self, cast
 
 import torch
@@ -11,6 +12,25 @@ from src.graph.spec.base_spec import (
     symmetry_edge_dict_type,
     symmetry_permutation_dict_type,
 )
+
+FEATURE_TYPE_WIDTH: dict[BaseFeatureType, int] = {
+    BaseFeatureType.SCALAR: 1,
+    BaseFeatureType.VECTOR_3D: 3,
+    BaseFeatureType.PSEUDOVECTOR_3D: 3,
+}
+
+OUTPUT_LABEL_LAYOUT: dict[str, tuple[str, list[BaseFeatureType]]] = {
+    "y_contact": ("foot", [BaseFeatureType.SCALAR]),
+    "y_ground_reaction_force": ("foot", [BaseFeatureType.VECTOR_3D]),
+    "y_base_velocity": (
+        "base",
+        [BaseFeatureType.VECTOR_3D, BaseFeatureType.PSEUDOVECTOR_3D],
+    ),
+    "y_total_ground_reaction_force": ("base", [BaseFeatureType.VECTOR_3D]),
+    "y_base_angular_acceleration": ("base", [BaseFeatureType.PSEUDOVECTOR_3D]),
+    "y_joint_acceleration": ("joint", [BaseFeatureType.SCALAR]),
+    "y_joint_friction": ("joint", [BaseFeatureType.SCALAR]),
+}
 
 
 class BaseSymmetry(ABC):
@@ -368,19 +388,194 @@ class BaseSymmetry(ABC):
                 inferred[node_type] = [(0, feature_dim, BaseFeatureType.SCALAR)]
         return inferred
 
-    def create_collate_fn(self):
-        """
-        TODO
+    @staticmethod
+    def _expand_blocks_for_feature_dim(
+        blocks: list[tuple[int, int, BaseFeatureType]],
+        feature_dim: int,
+    ) -> list[tuple[int, int, BaseFeatureType]]:
+        """Repeat a single-step layout across stacked history slices."""
+        if not blocks:
+            return blocks
+        layout_width = max(end for _, end, _ in blocks)
+        if layout_width <= 0 or feature_dim <= layout_width:
+            return blocks
+        if feature_dim % layout_width != 0:
+            return blocks
+        repeats = feature_dim // layout_width
+        expanded: list[tuple[int, int, BaseFeatureType]] = []
+        for slice_idx in range(repeats):
+            offset = slice_idx * layout_width
+            expanded.extend(
+                (start + offset, end + offset, feature_type)
+                for start, end, feature_type in blocks
+            )
+        return expanded
+
+    def _combo_coefficients(
+        self,
+        combo: tuple[str, ...],
+        feature_type: BaseFeatureType,
+    ) -> torch.Tensor:
+        """Compose per-operator reflection coefficients for a feature type."""
+        coefficients = torch.ones(3, dtype=torch.float32)
+        for sym_edge_type in combo:
+            axes_to_flip = self.symmetry_edge_types[sym_edge_type]
+            edge_coefficients = torch.tensor(
+                self._coefficients_from_axes(axes_to_flip, feature_type),
+                dtype=torch.float32,
+            )
+            coefficients = coefficients * edge_coefficients
+        return coefficients
+
+    def transform_x_dict(
+        self,
+        x_dict: dict[str, Any],
+        serialized_layout: dict[str, list[tuple[int, int, str]]] | None,
+        combo: tuple[str, ...],
+    ) -> dict[str, torch.Tensor]:
+        """Permute node rows and reflect component blocks under a symmetry combo."""
+        parsed_layout = self.parse_feature_type_layout(serialized_layout)
+        if not parsed_layout:
+            parsed_layout = self.infer_feature_type_layout(x_dict)
+
+        transformed_x_dict: dict[str, torch.Tensor] = {}
+        for node_type, x in x_dict.items():
+            if not isinstance(x, torch.Tensor) or x.ndim != 2:
+                transformed_x_dict[node_type] = x
+                continue
+
+            blocks = parsed_layout.get(node_type)
+            if blocks is None:
+                blocks = self.infer_feature_type_layout({node_type: x}).get(
+                    node_type, []
+                )
+            blocks = self._expand_blocks_for_feature_dim(blocks, int(x.shape[1]))
+
+            transformed = self.apply_row_permutation_combo(
+                x.clone(), node_type, combo
+            )
+            for start, end, feature_type in blocks:
+                if end <= start or feature_type == BaseFeatureType.SCALAR:
+                    continue
+                width = end - start
+                if width % 3 != 0:
+                    continue
+                coefficients = self._combo_coefficients(combo, feature_type).to(
+                    device=x.device, dtype=x.dtype
+                )
+                for offset in range(start, end, 3):
+                    transformed[:, offset : offset + 3] = (
+                        transformed[:, offset : offset + 3] * coefficients
+                    )
+
+            transformed_x_dict[node_type] = transformed
+
+        return transformed_x_dict
+
+    def _transform_label_rows(
+        self,
+        rows: torch.Tensor,
+        node_type: str,
+        combo: tuple[str, ...],
+    ) -> torch.Tensor:
+        permutation = self._output_permutation_indices(
+            node_type, combo, int(rows.shape[0])
+        )
+        index = torch.tensor(permutation, device=rows.device, dtype=torch.long)
+        return rows.index_select(0, index)
+
+    def _transform_label_blocks(
+        self,
+        rows: torch.Tensor,
+        feature_types: list[BaseFeatureType],
+        combo: tuple[str, ...],
+    ) -> torch.Tensor:
+        offset = 0
+        for feature_type in feature_types:
+            width = FEATURE_TYPE_WIDTH[feature_type]
+            if feature_type != BaseFeatureType.SCALAR and width == 3:
+                coefficients = self._combo_coefficients(combo, feature_type).to(
+                    device=rows.device, dtype=rows.dtype
+                )
+                rows[:, offset : offset + 3] = rows[:, offset : offset + 3] * coefficients
+            offset += width
+        return rows
+
+    def transform_label(
+        self,
+        tensor: torch.Tensor,
+        node_type: str,
+        feature_types: list[BaseFeatureType],
+        combo: tuple[str, ...],
+    ) -> torch.Tensor:
+        """Apply the same row permutation and reflections as the node features."""
+        width = sum(FEATURE_TYPE_WIDTH[feature_type] for feature_type in feature_types)
+        if width <= 0:
+            return tensor
+
+        if tensor.ndim == 1:
+            node_count = int(tensor.shape[0]) // width
+            if node_count * width != int(tensor.shape[0]) or node_count <= 0:
+                return tensor
+            rows = tensor.reshape(node_count, width).clone()
+            rows = self._transform_label_rows(rows, node_type, combo)
+            rows = self._transform_label_blocks(rows, feature_types, combo)
+            return rows.reshape(tensor.shape)
+
+        if tensor.ndim == 2 and tensor.shape[0] == 1:
+            dim = int(tensor.shape[1])
+            node_count = dim // width
+            if node_count * width != dim or node_count <= 0:
+                return tensor
+            rows = tensor.reshape(node_count, width).clone()
+            rows = self._transform_label_rows(rows, node_type, combo)
+            rows = self._transform_label_blocks(rows, feature_types, combo)
+            return rows.reshape(tensor.shape)
+
+        return tensor
+
+    def sample_combo(self) -> tuple[str, ...]:
+        """Sample one group element (including identity) for augmentation."""
+        combination = getattr(self, "combination", None)
+        if not combination:
+            return ()
+        return random.choice(combination)
+
+    def apply_symmetry_transform(
+        self,
+        data: HeteroDataBatch,
+        combo: tuple[str, ...],
+    ) -> HeteroDataBatch:
+        """Transform node features and all available labels consistently."""
+        new_data = data.clone()
+        serialized_layout = getattr(data, "feature_type_layout", None)
+        new_data.x_dict = self.transform_x_dict(
+            data.x_dict, serialized_layout, combo
+        )
+
+        for label_key, (node_type, feature_types) in OUTPUT_LABEL_LAYOUT.items():
+            if not hasattr(new_data, label_key):
+                continue
+            transformed_label = self.transform_label(
+                getattr(new_data, label_key), node_type, feature_types, combo
+            )
+            setattr(new_data, label_key, transformed_label)
+
+        return new_data
+
+    def create_collate_fn(self, augment: bool = True):
+        """Create a collate function, optionally applying symmetry augmentation.
+
+        INPUT:
+        - augment: If True each sample is transformed by a randomly sampled
+          group element; if False samples are only batched (validation/testing).
         """
 
         def collate_fn(data: list[HeteroDataBatch]) -> HeteroDataBatch:
-            """
-            TODO
-            """
-            expanded_data_list = self.expand_data(data)
+            data_list = self.expand_data(data) if augment else data
             return cast(
                 HeteroDataBatch,
-                Batch.from_data_list(cast(list[Any], expanded_data_list)),
+                Batch.from_data_list(cast(list[Any], data_list)),
             )
 
         return collate_fn

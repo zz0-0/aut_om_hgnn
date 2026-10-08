@@ -9,9 +9,9 @@ import torchmetrics
 
 from src.config.train_enum import OutputType, SpecType, Stage, SymmetryType
 
-type node_edge_relations_type = dict[str, list[tuple[str, str]]]
-type symmetry_edge_dict_type = dict[str, dict[str, list[int]]]
-type symmetry_permutation_dict_type = dict[str, dict[str, dict[str, list[int]]]]
+node_edge_relations_type = dict[str, list[tuple[str, str]]]
+symmetry_edge_dict_type = dict[str, dict[str, list[int]]]
+symmetry_permutation_dict_type = dict[str, dict[str, dict[str, list[int]]]]
 
 
 class AxisMetric(Metric):
@@ -494,10 +494,19 @@ class BaseSpec(ABC):
         """
         if output_type == OutputType.CONTACT:
             return 1
-        elif output_type == OutputType.GROUND_REACTION_FORCE:
+        elif output_type in (
+            OutputType.GROUND_REACTION_FORCE,
+            OutputType.TOTAL_GROUND_REACTION_FORCE,
+            OutputType.BASE_ANGULAR_ACCELERATION,
+        ):
             return 3
-        elif output_type == OutputType.CENTER_OF_MASS:
+        elif output_type == OutputType.BASE_VELOCITY:
             return 6
+        elif output_type in (
+            OutputType.JOINT_ACCELERATION,
+            OutputType.JOINT_FRICTION,
+        ):
+            return 1
         else:
             raise ValueError(f"Unknown output type: {output_type}")
 
@@ -514,6 +523,69 @@ class BaseSpec(ABC):
         raise ValueError(
             "Could not infer foot node count from symmetry_permutation_mapping()."
         )
+
+    @staticmethod
+    def _per_stage_metrics(
+        base_metrics: dict[str, Metric],
+    ) -> dict[Stage, dict[str, Metric]]:
+        return {
+            stage: {name: copy.deepcopy(metric) for name, metric in base_metrics.items()}
+            for stage in Stage
+        }
+
+    def _vector_regression_metrics(
+        self,
+        axis_names: list[str],
+        robot_mass: Optional[float] = None,
+    ) -> dict[str, Metric]:
+        base_metrics: dict[str, Metric] = {
+            "mae": torchmetrics.MeanAbsoluteError(),
+            "mse": torchmetrics.MeanSquaredError(),
+            "rmse": torchmetrics.MeanSquaredError(squared=False),
+            "r2_score": torchmetrics.R2Score(),
+            "cos_sim": StreamingCosineSimilarity(),
+        }
+
+        for i, axis in enumerate(axis_names):
+            base_metrics[f"mae_{axis}"] = AxisMetric(
+                torchmetrics.MeanAbsoluteError(), axis=i
+            )
+            base_metrics[f"mse_{axis}"] = AxisMetric(
+                torchmetrics.MeanSquaredError(), axis=i
+            )
+            base_metrics[f"rmse_{axis}"] = AxisMetric(
+                torchmetrics.MeanSquaredError(squared=False), axis=i
+            )
+            base_metrics[f"r2_score_{axis}"] = AxisMetric(
+                torchmetrics.R2Score(), axis=i
+            )
+
+        if robot_mass is not None and robot_mass > 0:
+            base_metrics["mae_weight_norm"] = WeightNormalizedMetric(
+                torchmetrics.MeanAbsoluteError(), robot_mass
+            )
+            base_metrics["rmse_weight_norm"] = WeightNormalizedMetric(
+                torchmetrics.MeanSquaredError(squared=False), robot_mass
+            )
+            for i, axis in enumerate(axis_names):
+                base_metrics[f"mae_{axis}_weight_norm"] = WeightNormalizedMetric(
+                    AxisMetric(torchmetrics.MeanAbsoluteError(), axis=i), robot_mass
+                )
+                base_metrics[f"rmse_{axis}_weight_norm"] = WeightNormalizedMetric(
+                    AxisMetric(torchmetrics.MeanSquaredError(squared=False), axis=i),
+                    robot_mass,
+                )
+
+        return base_metrics
+
+    @staticmethod
+    def _scalar_regression_metrics() -> dict[str, Metric]:
+        return {
+            "mae": torchmetrics.MeanAbsoluteError(),
+            "mse": torchmetrics.MeanSquaredError(),
+            "rmse": torchmetrics.MeanSquaredError(squared=False),
+            "r2_score": torchmetrics.R2Score(),
+        }
 
     def metric_functions(
         self,
@@ -725,7 +797,7 @@ class BaseSpec(ABC):
                 for stage in Stage
             }
 
-        elif output_type == OutputType.CENTER_OF_MASS:
+        elif output_type == OutputType.BASE_VELOCITY:
             # Create both aggregate metrics and per-component (linear/angular) metrics
             base_metrics = {}
 
@@ -760,6 +832,27 @@ class BaseSpec(ABC):
                 }
                 for stage in Stage
             }
+
+        elif output_type == OutputType.TOTAL_GROUND_REACTION_FORCE:
+            return self._per_stage_metrics(
+                self._vector_regression_metrics(
+                    axis_names=["x", "y", "z"],
+                    robot_mass=robot_mass,
+                )
+            )
+
+        elif output_type == OutputType.BASE_ANGULAR_ACCELERATION:
+            return self._per_stage_metrics(
+                self._vector_regression_metrics(
+                    axis_names=["x", "y", "z"],
+                )
+            )
+
+        elif output_type in (
+            OutputType.JOINT_ACCELERATION,
+            OutputType.JOINT_FRICTION,
+        ):
+            return self._per_stage_metrics(self._scalar_regression_metrics())
 
         else:
             raise ValueError(f"Unknown output type: {output_type}")

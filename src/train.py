@@ -138,6 +138,7 @@ def main():
         model_type=train_config.model_type,
         spec=spec,
         parser_path=parser_path,
+        symmetry_edges=train_config.symmetry_edges,
     )
     morphology: RobotMorphology = parser.parse()
     # coefficients = parser.get_reflection_coefficients()
@@ -157,7 +158,7 @@ def main():
     # Each sample contains:
     # - x_dict: {node_type: feature_tensor} (e.g., BASE, JOINT, FOOT, etc.)
     # - edge_index_dict: {edge_type: edge_indices}
-    # - y_contact_states, y_contact_forces, y_com: labels
+    # - y_contact, y_ground_reaction_force, y_base_velocity: labels
     #
     # The Dataset internally uses FeatureExtractor to:
     # - Load Numpy memmap timestep data
@@ -186,13 +187,13 @@ def main():
     logger.info(f"✓ Dataset created: {len(dataset)} samples")
 
     # Create DataLoaders for training and validation
-    train_size = int(len(dataset) * (1 - train_config.val_split_ratio))
-    val_size = len(dataset) - train_size
-    # Keep split reproducible (and optionally independent from training seed).
-    split_generator = torch.Generator().manual_seed(args.split_seed)
-    train_dataset, val_dataset = torch.utils.data.random_split(  # type: ignore
-        dataset, [train_size, val_size], generator=split_generator
+    # Split by whole (env, episode) trajectories so overlapping history windows
+    # can never cross the train/val boundary.
+    train_indices, val_indices = dataset.trajectory_split_indices(
+        train_config.val_split_ratio, args.split_seed
     )
+    train_dataset = torch.utils.data.Subset(dataset, train_indices.tolist())  # type: ignore
+    val_dataset = torch.utils.data.Subset(dataset, val_indices.tolist())  # type: ignore
 
     # =================================================================
     # STEP 4.5: Create Symmetry Expansion (Optional, MS-HGNN only)
@@ -225,34 +226,46 @@ def main():
 
     collate_fn = None  # Default: no custom collate (MI-HGNN path)
 
-    if train_config.model_type == ModelType.MS_HGNN:
+    use_symmetry_augmentation = (
+        train_config.symmetry_augmentation
+        if train_config.symmetry_augmentation is not None
+        else train_config.model_type == ModelType.MS_HGNN
+    )
+    if use_symmetry_augmentation:
         symmetry = BaseSymmetry.create_symmetry(
             train_config.symmetry_type,
             spec.symmetry_edge_mapping(),
-            spec.symmetry_permutation_mapping(),
+            morphology.symmetry_permutation_dict
+            or spec.symmetry_permutation_mapping(),
         )
         logger.info(f"✓ Symmetry created: {train_config.symmetry_type.value} group")
-        collate_fn = symmetry.create_collate_fn()
+        collate_fn = symmetry.create_collate_fn(augment=True)
         logger.info(
-            f" ✓ Custom collate function created for {train_config.symmetry_type}"
+            f" ✓ Custom collate function created for {train_config.symmetry_type} "
+            "(training only; validation uses untransformed data)"
         )
 
     # Create DataLoaders with optional symmetry collate_fn
+    loader_kwargs: dict = {
+        "num_workers": train_config.num_workers,
+        "pin_memory": True,
+    }
+    if train_config.num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 4
+
     train_loader = DataLoader(  # type: ignore
         train_dataset,  # type: ignore
         batch_size=train_config.batch_size,
         shuffle=True,
-        num_workers=train_config.num_workers,
-        pin_memory=True,
         collate_fn=collate_fn,
+        **loader_kwargs,
     )
     val_loader = DataLoader(  # type: ignore
         val_dataset,  # type: ignore
         batch_size=train_config.batch_size,
         shuffle=False,
-        num_workers=train_config.num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn,
+        **loader_kwargs,
     )
     logger.info(f"  - Train samples: {len(train_dataset)}")  # type: ignore
     logger.info(f"  - Val samples: {len(val_dataset)}")  # type: ignore

@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Continue remaining pairs if one pair fails",
     )
+    parser.add_argument(
+        "--run-id-suffix",
+        type=str,
+        default="",
+        help="Suffix appended to W&B run ids (use to re-run previously deleted runs)",
+    )
     return parser.parse_args()
 
 
@@ -211,8 +217,9 @@ def main() -> None:
                 continue
 
             run_name = f"{config_stem}_seed{seed:02d}"
+            suffix = f"-{args.run_id_suffix}" if args.run_id_suffix else ""
             run_id = _safe_slug(
-                f"{args.wandb_supergroup}-{config_stem}-seed-{seed:02d}"
+                f"{args.wandb_supergroup}-{config_stem}-seed-{seed:02d}{suffix}"
             )
             run_checkpoint_dir = checkpoint_root / super_slug / config_slug / run_name
             last_ckpt = run_checkpoint_dir / "last.ckpt"

@@ -183,12 +183,22 @@ class QHMG(BaseSpec):
         OUTPUT:
         - Node type name: "foot", "base", etc.
         """
-        if output_type == OutputType.CONTACT:
+        if output_type in (
+            OutputType.CONTACT,
+            OutputType.GROUND_REACTION_FORCE,
+        ):
             return QHMGNodeType.FOOT.value
-        elif output_type == OutputType.GROUND_REACTION_FORCE:
-            return QHMGNodeType.FOOT.value
-        elif output_type == OutputType.CENTER_OF_MASS:
+        elif output_type in (
+            OutputType.BASE_VELOCITY,
+            OutputType.TOTAL_GROUND_REACTION_FORCE,
+            OutputType.BASE_ANGULAR_ACCELERATION,
+        ):
             return QHMGNodeType.BASE.value
+        elif output_type in (
+            OutputType.JOINT_ACCELERATION,
+            OutputType.JOINT_FRICTION,
+        ):
+            return QHMGNodeType.JOINT.value
         else:
             raise ValueError(f"Unknown output type: {output_type}")
 

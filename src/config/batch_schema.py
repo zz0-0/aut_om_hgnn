@@ -3,8 +3,8 @@
 from torch_geometric.data import HeteroData  # type: ignore
 import torch
 
-type x_dict_type = dict[str, torch.Tensor]
-type edge_index_dict_type = dict[tuple[str, str, str], torch.Tensor]
+x_dict_type = dict[str, torch.Tensor]
+edge_index_dict_type = dict[tuple[str, str, str], torch.Tensor]
 
 
 class HeteroDataBatch(HeteroData):
@@ -20,9 +20,13 @@ class HeteroDataBatch(HeteroData):
     FIELDS:
     - x_dict: Node features for each node type
     - edge_index_dict: Edge connectivity for each edge type
-    - y_contact_states: Ground truth contact state labels
-    - y_contact_forces: Ground truth ground reaction force (GRF) labels
-    - y_com: Ground truth center of mass labels
+    - y_contact: Ground truth per-foot contact state labels
+    - y_ground_reaction_force: Ground truth per-foot GRF labels
+    - y_base_velocity: Ground truth base linear/angular velocity labels
+    - y_total_ground_reaction_force: Ground truth summed GRF labels
+    - y_base_angular_acceleration: Ground truth body-frame base angular acceleration
+    - y_joint_acceleration: Ground truth joint acceleration labels
+    - y_joint_friction: Ground truth joint friction torque labels
     """
 
     x_dict: x_dict_type
@@ -31,11 +35,23 @@ class HeteroDataBatch(HeteroData):
     edge_index_dict: edge_index_dict_type
     """Edge connectivity: {(src_type, edge_type, dst_type): (2, num_edges)}"""
 
-    y_contact_states: torch.Tensor
+    y_contact: torch.Tensor
     """Contact state labels: (batch_size, num_feet)"""
 
-    y_contact_forces: torch.Tensor
-    """Ground reaction force labels: (batch_size, num_feet, 3)"""
+    y_ground_reaction_force: torch.Tensor
+    """Per-foot GRF labels: (batch_size, num_feet * 3)"""
 
-    y_com: torch.Tensor
-    """Center of mass labels: (batch_size, 3)"""
+    y_base_velocity: torch.Tensor
+    """Base linear + angular velocity labels: (batch_size, 6)"""
+
+    y_total_ground_reaction_force: torch.Tensor
+    """Summed ground reaction force labels: (batch_size, 3)"""
+
+    y_base_angular_acceleration: torch.Tensor
+    """Body-frame base angular acceleration labels: (batch_size, 3)"""
+
+    y_joint_acceleration: torch.Tensor
+    """Joint acceleration labels: (batch_size, num_joints)"""
+
+    y_joint_friction: torch.Tensor
+    """Joint friction torque labels: (batch_size, num_joints)"""

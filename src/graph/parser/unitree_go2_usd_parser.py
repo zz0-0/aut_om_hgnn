@@ -4,12 +4,17 @@ from typing import Self
 from pxr import Usd, UsdPhysics  # type: ignore
 import torch
 
-from src.graph.spec.qhmg import QHMGNodeType
+from src.graph.spec.qhmg import QHMGNodeType, QHMGSymmetryEdgeType
 from src.graph.morphology.base_morphology import RobotMorphology
-from src.graph.spec.base_spec import BaseSpec
-from src.config.train_enum import ModelType, RobotType
+from src.graph.spec.base_spec import BaseSpec, symmetry_permutation_dict_type
+from src.config.train_enum import ModelType, RobotType, SymmetryType
 from src.config.batch_schema import edge_index_dict_type
 from src.graph.parser.base_parser import BaseParser
+from src.graph.parser.symmetry_utils import (
+    build_name_permutation,
+    quadruped_front_back_partner,
+    quadruped_left_right_partner,
+)
 
 
 class UnitreeGO2USDParser(BaseParser):
@@ -35,7 +40,13 @@ class UnitreeGO2USDParser(BaseParser):
     - Feet: child links of ankle joints (contains "foot" or "ankle" in name)
     """
 
-    def __init__(self, model_type: ModelType, spec: BaseSpec, parser_path: Path):
+    def __init__(
+        self,
+        model_type: ModelType,
+        spec: BaseSpec,
+        parser_path: Path,
+        symmetry_edges: bool | None = None,
+    ):
         """
         Initialize USD parser.
 
@@ -48,11 +59,20 @@ class UnitreeGO2USDParser(BaseParser):
         self.model_type = model_type
         self.spec = spec
         self.parser_path = Path(parser_path)
+        self.symmetry_edges = (
+            model_type == ModelType.MS_HGNN
+            if symmetry_edges is None
+            else symmetry_edges
+        )
         self.physics_path = self.find_physics_usd_path()
 
     @classmethod
     def build_from(
-        cls, model_type: ModelType, spec: BaseSpec, parser_path: Path
+        cls,
+        model_type: ModelType,
+        spec: BaseSpec,
+        parser_path: Path,
+        symmetry_edges: bool | None = None,
     ) -> Self:
         """
         Factory constructor for USDParser.
@@ -68,7 +88,7 @@ class UnitreeGO2USDParser(BaseParser):
         parser = USDParser.build_from(spec, "usd/go2.usd")
         morphology = parser.parse()
         """
-        return cls(model_type, spec, parser_path)
+        return cls(model_type, spec, parser_path, symmetry_edges)
 
     def find_physics_usd_path(self) -> Path:
         """
@@ -130,11 +150,17 @@ class UnitreeGO2USDParser(BaseParser):
 
         node_type_usd_node_dict = self._extract_usd_to_node_types(physics_stage)  # type: ignore
         self._node_type_usd_node_dict = node_type_usd_node_dict
+        self._symmetry_permutation_dict = self._build_symmetry_permutation_dict(
+            node_type_usd_node_dict
+        )
         node_type_usd_node_index_dict = self._build_index_dict(node_type_usd_node_dict)
         edge_index_dict = self._build_edge_index_dict(node_type_usd_node_index_dict)
 
         morphology = RobotMorphology(
-            node_type_usd_node_dict, node_type_usd_node_index_dict, edge_index_dict
+            node_type_usd_node_dict,
+            node_type_usd_node_index_dict,
+            edge_index_dict,
+            self._symmetry_permutation_dict,
         )
         return morphology
 
@@ -225,6 +251,25 @@ class UnitreeGO2USDParser(BaseParser):
         self._validate_go2_node_types(node_type)
 
         return node_type
+
+    def _build_symmetry_permutation_dict(
+        self, node_type_usd_node_dict: dict[str, list[str]]
+    ) -> symmetry_permutation_dict_type:
+        """Build K4 row permutations from leg names for each node type."""
+        per_node_type: dict[str, dict[str, list[int]]] = {}
+        for node_type in (QHMGNodeType.JOINT.value, QHMGNodeType.FOOT.value):
+            names = node_type_usd_node_dict.get(node_type, [])
+            if not names:
+                continue
+            per_node_type[node_type] = {
+                QHMGSymmetryEdgeType.GT.value: build_name_permutation(
+                    names, quadruped_front_back_partner
+                ),
+                QHMGSymmetryEdgeType.GS.value: build_name_permutation(
+                    names, quadruped_left_right_partner
+                ),
+            }
+        return {SymmetryType.K4.value: per_node_type}
 
     def _validate_go2_node_types(self, node_type: dict[str, list[str]]) -> None:
         base_nodes = node_type.get(QHMGNodeType.BASE.value, [])
@@ -355,7 +400,7 @@ class UnitreeGO2USDParser(BaseParser):
                             target_indices,
                         )
 
-        if self.model_type == ModelType.MS_HGNN:
+        if self.symmetry_edges:
             for (
                 edge_type,
                 node_pairs,
@@ -366,7 +411,7 @@ class UnitreeGO2USDParser(BaseParser):
                     target_indices = node_type_index_dict[target_node_type]
 
                     group_permutation = (
-                        self._resolve_group_permutation_from_spec(
+                        self._resolve_group_permutation(
                             source_node_type, edge_type
                         )
                         if source_node_type == target_node_type
@@ -397,6 +442,23 @@ class UnitreeGO2USDParser(BaseParser):
                         )
 
         return edge_index_dict
+
+    def _resolve_group_permutation(
+        self,
+        node_type: str,
+        edge_type: str,
+    ) -> list[int] | None:
+        """Resolve permutations from name-based morphology, falling back to spec."""
+        mapping = getattr(self, "_symmetry_permutation_dict", None)
+        if mapping:
+            for per_symmetry in mapping.values():
+                node_mapping = per_symmetry.get(node_type)
+                if node_mapping is None:
+                    continue
+                permutation = node_mapping.get(edge_type)
+                if permutation is not None and len(permutation) > 0:
+                    return permutation
+        return self._resolve_group_permutation_from_spec(node_type, edge_type)
 
     def _resolve_group_permutation_from_spec(
         self,

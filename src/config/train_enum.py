@@ -43,7 +43,8 @@ class OutputType(Enum):
     Output types to estimate.
 
     Each output type carries ALL its metadata:
-    - What we're estimating (contact, GRF, COM)
+    - What we're estimating (contact, per-foot GRF, base twist, total GRF,
+      base angular acceleration, joint acceleration, joint friction)
     - Loss function for training
     - Output dimensions
     - Which node type produces this prediction
@@ -53,4 +54,8 @@ class OutputType(Enum):
 
     CONTACT = "CONTACT"
     GROUND_REACTION_FORCE = "GROUND_REACTION_FORCE"
-    CENTER_OF_MASS = "CENTER_OF_MASS"
+    BASE_VELOCITY = "BASE_VELOCITY"
+    TOTAL_GROUND_REACTION_FORCE = "TOTAL_GROUND_REACTION_FORCE"
+    BASE_ANGULAR_ACCELERATION = "BASE_ANGULAR_ACCELERATION"
+    JOINT_ACCELERATION = "JOINT_ACCELERATION"
+    JOINT_FRICTION = "JOINT_FRICTION"

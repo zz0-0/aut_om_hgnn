@@ -4,7 +4,7 @@ robot_type: UNITREE_GO2
 output_type: CONTACT
 symmetry_type: K4
 parser_path: src/graph/parser/usd/go2.usd
-dataset_path: src/data/dataset/datasets_memmap/go2_locomotion_memmap_20260314_103007
+dataset_path: src/data/dataset/datasets_memmap/go2_locomotion_memmap_friction
 val_split_ratio: 0.2
 batch_size: 128
 num_workers: 4

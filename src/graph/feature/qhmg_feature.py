@@ -52,7 +52,7 @@ class QHMGFeatureExtractor(BaseFeature):
             )
         return tensor[:3]
 
-    def _joint_indices_for_type(
+    def joint_indices_for_type(
         self, raw_data: Dict[str, Any], node_type: str
     ) -> list[int]:
         joint_names = raw_data.get("joint_names")
@@ -114,8 +114,8 @@ class QHMGFeatureExtractor(BaseFeature):
         return features
 
     def _extract_foot_kinematics(self, raw_data: Dict[str, Any]) -> torch.Tensor:
-        foot_pos = raw_data["foot_pos_w"].to(torch.float32)
-        foot_vel = raw_data["foot_lin_vel_w"].to(torch.float32)
+        foot_pos = raw_data["foot_pos"].to(torch.float32)
+        foot_vel = raw_data["foot_lin_vel"].to(torch.float32)
 
         if foot_pos.ndim != 2 or foot_vel.ndim != 2:
             raise ValueError(
@@ -203,7 +203,7 @@ class QHMGFeatureExtractor(BaseFeature):
         Features per joint: [pos, vel, torque]
         Shape: [num_joints, 3]
         """
-        indices = self._joint_indices_for_type(raw_data, QHMGNodeType.JOINT.value)
+        indices = self.joint_indices_for_type(raw_data, QHMGNodeType.JOINT.value)
         return self._build_motor_scalar_features(raw_data, indices)
 
     def _extract_foot_features(self, raw_data: Dict[str, Any]) -> torch.Tensor:

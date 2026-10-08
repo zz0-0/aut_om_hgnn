@@ -63,7 +63,7 @@ class BHMGFeatureExtractor(BaseFeature):
         """
         return cls(spec, morphology)
 
-    def _joint_indices_for_type(
+    def joint_indices_for_type(
         self, raw_data: dict[str, Any], node_type: str
     ) -> list[int]:
         joint_names = raw_data.get("joint_names")
@@ -100,17 +100,17 @@ class BHMGFeatureExtractor(BaseFeature):
         return torch.cat([pos, vel, torque], dim=1)
 
     def _extract_foot_kinematics(self, raw_data: dict[str, Any]) -> torch.Tensor:
-        foot_pos = raw_data["foot_pos_w"].to(torch.float32)
-        foot_vel = raw_data["foot_lin_vel_w"].to(torch.float32)
+        foot_pos = raw_data["foot_pos"].to(torch.float32)
+        foot_vel = raw_data["foot_lin_vel"].to(torch.float32)
 
         if foot_pos.ndim != 2 or foot_vel.ndim != 2:
             raise ValueError(
-                "foot_pos_w and foot_lin_vel_w must be rank-2 tensors "
+                "foot_pos and foot_lin_vel must be rank-2 tensors "
                 f"but got {tuple(foot_pos.shape)} and {tuple(foot_vel.shape)}"
             )
         if foot_pos.shape[1] != 3 or foot_vel.shape[1] != 3:
             raise ValueError(
-                "foot_pos_w and foot_lin_vel_w must have last dim=3 "
+                "foot_pos and foot_lin_vel must have last dim=3 "
                 f"but got {tuple(foot_pos.shape)} and {tuple(foot_vel.shape)}"
             )
 
@@ -128,8 +128,8 @@ class BHMGFeatureExtractor(BaseFeature):
         return out
 
     def _extract_hand_kinematics(self, raw_data: dict[str, Any]) -> torch.Tensor:
-        hand_pos_any = raw_data.get("hand_pos_w")
-        hand_vel_any = raw_data.get("hand_lin_vel_w")
+        hand_pos_any = raw_data.get("hand_pos")
+        hand_vel_any = raw_data.get("hand_lin_vel")
         expected = len(self.node_type_names[BHMGNodeType.HAND.value])
 
         if expected <= 0:
@@ -140,7 +140,7 @@ class BHMGFeatureExtractor(BaseFeature):
         ):
             raise ValueError(
                 "BHMG hand nodes require hand kinematics inputs. "
-                "Please provide raw_data['hand_pos_w'] and raw_data['hand_lin_vel_w'] "
+                "Please provide raw_data['hand_pos'] and raw_data['hand_lin_vel'] "
                 "with shape [num_hands, 3]."
             )
 
@@ -149,12 +149,12 @@ class BHMGFeatureExtractor(BaseFeature):
 
         if hand_pos.ndim != 2 or hand_vel.ndim != 2:
             raise ValueError(
-                "hand_pos_w and hand_lin_vel_w must be rank-2 tensors "
+                "hand_pos and hand_lin_vel must be rank-2 tensors "
                 f"but got {tuple(hand_pos.shape)} and {tuple(hand_vel.shape)}"
             )
         if hand_pos.shape[1] != 3 or hand_vel.shape[1] != 3:
             raise ValueError(
-                "hand_pos_w and hand_lin_vel_w must have last dim=3 "
+                "hand_pos and hand_lin_vel must have last dim=3 "
                 f"but got {tuple(hand_pos.shape)} and {tuple(hand_vel.shape)}"
             )
 
@@ -241,7 +241,7 @@ class BHMGFeatureExtractor(BaseFeature):
         OUTPUT:
         - torch.Tensor of shape [num_joint_nodes, 3] (pos, vel, torque)
         """
-        indices = self._joint_indices_for_type(raw_data, BHMGNodeType.JOINT.value)
+        indices = self.joint_indices_for_type(raw_data, BHMGNodeType.JOINT.value)
         return self._build_motor_scalar_features(raw_data, indices)
 
     def _extract_foot_features(self, raw_data: dict[str, Any]) -> torch.Tensor:
@@ -252,7 +252,7 @@ class BHMGFeatureExtractor(BaseFeature):
         - raw_data: Dict containing raw sensor data for one timestep
 
         OUTPUT:
-        - torch.Tensor of shape [num_foot_nodes, 6] (foot_pos_w, foot_lin_vel_w)
+        - torch.Tensor of shape [num_foot_nodes, 6] (foot_pos, foot_lin_vel)
         """
         return self._extract_foot_kinematics(raw_data)
 

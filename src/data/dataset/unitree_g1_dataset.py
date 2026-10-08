@@ -15,6 +15,7 @@ The processing pipeline is intentionally verbose so long preprocessing runs do n
 stuck and users can track progress and ETA in the terminal.
 """
 
+import hashlib
 import json
 import os.path as osp
 from pathlib import Path
@@ -35,6 +36,13 @@ from src.graph.morphology.base_morphology import RobotMorphology
 
 class UnitreeG1Dataset(BaseDataset):
     """History-agnostic dataset for Unitree robots backed by NumPy memmaps."""
+
+    PROCESSED_CACHE_VERSION = 3
+    DERIVED_TARGET_KEYS = (
+        "total_ground_reaction_force",
+        "base_angular_acceleration",
+        "joint_acceleration",
+    )
 
     def __init__(
         self,
@@ -59,6 +67,7 @@ class UnitreeG1Dataset(BaseDataset):
         self.base_sample_lut: np.ndarray = np.empty((0, 3), dtype=np.int32)
         self.sample_end_indices: np.ndarray = np.empty((0,), dtype=np.int64)
         self.num_samples = 0
+        self.control_dt = 0.02
         self._logged_feature_mode = False
         self.node_feature_dims = self.spec.node_types_with_history(self.history_length)
         self.base_node_feature_dims = self.spec.node_types_with_history(1)
@@ -141,6 +150,7 @@ class UnitreeG1Dataset(BaseDataset):
     def _load_or_process_dataset(self):
         """Load compatible processed cache, or rebuild it from raw memmaps."""
         self.processed_data_path = Path(self.processed_paths[0])
+        self.metadata = self._load_metadata()
         self.logger.info(
             "Resolved processed manifest path: %s", self.processed_data_path
         )
@@ -170,6 +180,9 @@ class UnitreeG1Dataset(BaseDataset):
 
     def _is_manifest_compatible(self, manifest: dict[str, Any]) -> bool:
         """Validate whether a processed cache manifest matches current dataset settings."""
+        if int(manifest.get("version", 0)) != self.PROCESSED_CACHE_VERSION:
+            return False
+
         manifest_dims = {
             key: int(value)
             for key, value in manifest.get("node_feature_dims", {}).items()
@@ -184,7 +197,34 @@ class UnitreeG1Dataset(BaseDataset):
         if manifest_counts != self.node_counts:
             return False
 
+        manifest_raw_fields = sorted(manifest.get("raw_field_names", []))
+        current_raw_fields = sorted(self.metadata["files"]["fields"].keys())
+        if manifest_raw_fields != current_raw_fields:
+            return False
+
+        if manifest.get("raw_fingerprint") != self._raw_fingerprint():
+            return False
+
         return True
+
+    def _raw_fingerprint(self) -> str:
+        """Hash raw memmap files so regenerated raw data invalidates the cache."""
+        files = self.metadata.get("files", {})
+        names: set[str] = {"metadata.json"}
+        for value in files.values():
+            if isinstance(value, dict):
+                names.update(str(item) for item in value.values())
+            elif isinstance(value, str):
+                names.add(value)
+        digest = hashlib.sha1()
+        for name in sorted(names):
+            path = self.dataset_path / name
+            try:
+                stat = path.stat()
+                digest.update(f"{name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+            except OSError:
+                digest.update(f"{name}:missing".encode())
+        return digest.hexdigest()
 
     @property
     def processed_dir(self):
@@ -253,9 +293,23 @@ class UnitreeG1Dataset(BaseDataset):
         data.y_ground_reaction_force = self._to_tensor(
             self._processed_arrays["y_ground_reaction_force"][end_cache_idx]
         ).unsqueeze(0)
-        data.y_center_of_mass = self._to_tensor(
-            self._processed_arrays["y_center_of_mass"][end_cache_idx]
+        data.y_base_velocity = self._to_tensor(
+            self._processed_arrays["y_base_velocity"][end_cache_idx]
         ).unsqueeze(0)
+        for target_key in (
+            "y_total_ground_reaction_force",
+            "y_base_angular_acceleration",
+            "y_joint_acceleration",
+            "y_joint_friction",
+        ):
+            if target_key in self._processed_arrays:
+                setattr(
+                    data,
+                    target_key,
+                    self._to_tensor(
+                        self._processed_arrays[target_key][end_cache_idx]
+                    ).unsqueeze(0),
+                )
         data.feature_type_layout = self.feature_type_layout
 
         env_idx, episode_idx, time_idx = self.sample_lut[idx].tolist()
@@ -264,6 +318,39 @@ class UnitreeG1Dataset(BaseDataset):
         data.time_idx = int(time_idx)
 
         return data
+
+    def trajectory_split_indices(
+        self,
+        val_split_ratio: float,
+        split_seed: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Split sample indices by (env, episode) trajectory to avoid window leakage."""
+        if not 0.0 < val_split_ratio < 1.0:
+            raise ValueError("val_split_ratio must be in (0, 1)")
+        if self.sample_lut.size == 0:
+            empty = np.empty((0,), dtype=np.int64)
+            return empty, empty
+
+        trajectories = self.sample_lut[:, :2]
+        unique_trajectories, inverse = np.unique(
+            trajectories, axis=0, return_inverse=True
+        )
+        num_trajectories = int(unique_trajectories.shape[0])
+        if num_trajectories < 2:
+            raise ValueError(
+                "Need at least 2 distinct trajectories to create a train/val split."
+            )
+
+        rng = np.random.default_rng(split_seed)
+        order = rng.permutation(num_trajectories)
+        val_count = int(round(num_trajectories * val_split_ratio))
+        val_count = min(max(val_count, 1), num_trajectories - 1)
+        val_groups = np.zeros(num_trajectories, dtype=bool)
+        val_groups[order[:val_count]] = True
+
+        sample_indices = np.arange(self.sample_lut.shape[0], dtype=np.int64)
+        is_val = val_groups[inverse]
+        return sample_indices[~is_val], sample_indices[is_val]
 
     def _configure_runtime_sample_lut(self) -> None:
         """Build runtime sample indices for the requested history length.
@@ -327,10 +414,21 @@ class UnitreeG1Dataset(BaseDataset):
         self.logger.info("[1/5] Loading metadata and raw memmap fields...")
         self.metadata = self._load_metadata()
         raw_fields = self._load_raw_fields(self.metadata)
+        self.logger.info(
+            "Raw frame variant: foot_pos=%s | foot_vel=%s | root_vel=%s | contacts=%s",
+            self._pick_field_key(raw_fields, ("foot_pos_b", "foot_pos_w")),
+            self._pick_field_key(raw_fields, ("foot_lin_vel_b", "foot_lin_vel_w")),
+            self._pick_field_key(
+                raw_fields, ("root_com_lin_vel_b", "root_com_lin_vel_w")
+            ),
+            self._pick_field_key(raw_fields, ("contact_forces_b", "contact_forces")),
+        )
+        self.control_dt = self._resolve_control_dt(self.metadata)
         self._joint_names = [
             str(name) for name in self.metadata["index_maps"].get("joint_names", [])
         ]
         self.logger.info("Loaded %d joint names", len(self._joint_names))
+        self.logger.info("Control timestep: %.6f s", self.control_dt)
         self.logger.info("[2/5] Building sample lookup table...")
         sample_lut = self._build_sample_lut(self.metadata)
         self.logger.info("[3/5] Materializing processed cache arrays...")
@@ -351,6 +449,23 @@ class UnitreeG1Dataset(BaseDataset):
         metadata_path = self.dataset_path / "metadata.json"
         self.logger.info("Loading metadata from %s", metadata_path)
         return json.loads(metadata_path.read_text())
+
+    @staticmethod
+    def _resolve_control_dt(metadata: dict[str, Any]) -> float:
+        """Resolve the control timestep used for finite-difference targets."""
+        global_metadata = metadata.get("global_metadata", {})
+        candidates = [
+            global_metadata.get("control_dt"),
+            global_metadata.get("step_dt"),
+            metadata.get("control_dt"),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            value = float(candidate)
+            if value > 0:
+                return value
+        return 0.02
 
     def _load_raw_fields(self, metadata: dict[str, Any]) -> dict[str, np.ndarray]:
         """Open all raw field memmaps declared in metadata without loading into RAM."""
@@ -401,7 +516,10 @@ class UnitreeG1Dataset(BaseDataset):
             self.processed_dir,
             num_samples,
         )
-        arrays = self._create_processed_arrays(num_samples)
+        arrays = self._create_processed_arrays(
+            num_samples,
+            has_joint_friction="joint_friction" in raw_fields,
+        )
         arrays["sample_lut"][:] = sample_lut
 
         if num_samples == 0:
@@ -423,7 +541,13 @@ class UnitreeG1Dataset(BaseDataset):
                 history_length=1,
             )
             x_dict = self._extract_features(raw_data, history_length=1)
-            self._write_processed_sample(arrays, sample_idx, x_dict, raw_data)
+            targets = self._extract_targets(
+                raw_fields,
+                int(env_idx),
+                int(episode_idx),
+                int(time_idx),
+            )
+            self._write_processed_sample(arrays, sample_idx, x_dict, raw_data, targets)
 
             done = sample_idx + 1
             if done % report_every == 0 or done == num_samples:
@@ -448,6 +572,7 @@ class UnitreeG1Dataset(BaseDataset):
         sample_idx: int,
         x_dict: dict[str, torch.Tensor],
         raw_data: dict[str, torch.Tensor],
+        targets: dict[str, np.ndarray],
     ) -> None:
         for node_type in self.base_node_feature_dims:
             array_key = f"x_{node_type}"
@@ -472,9 +597,47 @@ class UnitreeG1Dataset(BaseDataset):
             base_lin_vel = base_lin_vel[-1]
         if base_ang_vel.ndim > 1:
             base_ang_vel = base_ang_vel[-1]
-        arrays["y_center_of_mass"][sample_idx] = (
+        arrays["y_base_velocity"][sample_idx] = (
             torch.cat([base_lin_vel, base_ang_vel]).cpu().numpy()
         )
+
+        arrays["y_total_ground_reaction_force"][sample_idx] = targets[
+            "total_ground_reaction_force"
+        ]
+        arrays["y_base_angular_acceleration"][sample_idx] = targets[
+            "base_angular_acceleration"
+        ]
+
+        joint_indices = self.feature_extractor.joint_indices_for_type(
+            raw_data, "joint"
+        )
+        arrays["y_joint_acceleration"][sample_idx] = self._reorder_joint_values(
+            targets["joint_acceleration"], joint_indices
+        )
+        if "y_joint_friction" in arrays and "joint_friction" in targets:
+            arrays["y_joint_friction"][sample_idx] = self._reorder_joint_values(
+                targets["joint_friction"], joint_indices
+            )
+
+    @staticmethod
+    def _reorder_joint_values(
+        values: np.ndarray,
+        indices: list[int],
+    ) -> np.ndarray:
+        """Reorder raw joint vectors into graph joint-node order."""
+        values_np = np.asarray(values, dtype=np.float32).reshape(-1)
+        reordered = np.zeros(len(indices), dtype=np.float32)
+        valid_positions: list[int] = []
+        valid_indices: list[int] = []
+        for position, raw_idx in enumerate(indices):
+            if 0 <= raw_idx < values_np.shape[0]:
+                valid_positions.append(position)
+                valid_indices.append(raw_idx)
+        if valid_positions:
+            reordered[np.asarray(valid_positions, dtype=np.int64)] = values_np[
+                np.asarray(valid_indices, dtype=np.int64)
+            ]
+        return reordered
 
     def _flush_arrays(self, arrays: dict[str, np.memmap]) -> None:
         """Flush all processed memmap buffers to disk."""
@@ -489,9 +652,15 @@ class UnitreeG1Dataset(BaseDataset):
     ) -> dict[str, Any]:
         """Build manifest metadata required to reopen processed cache quickly."""
         return {
-            "version": 1,
+            "version": self.PROCESSED_CACHE_VERSION,
             "num_samples": num_samples,
             "history_length": 1,
+            "control_dt": self.control_dt,
+            "raw_field_names": sorted(self.metadata["files"]["fields"].keys()),
+            "raw_fingerprint": self._raw_fingerprint(),
+            "available_targets": sorted(
+                name for name in arrays if name.startswith("y_")
+            ),
             "node_feature_dims": self.base_node_feature_dims,
             "node_counts": self.node_counts,
             "arrays": {
@@ -504,7 +673,11 @@ class UnitreeG1Dataset(BaseDataset):
             },
         }
 
-    def _create_processed_arrays(self, num_samples: int) -> dict[str, np.memmap]:
+    def _create_processed_arrays(
+        self,
+        num_samples: int,
+        has_joint_friction: bool = False,
+    ) -> dict[str, np.memmap]:
         """Allocate output memmaps with exact shapes based on spec and morphology."""
         arrays: dict[str, np.memmap] = {}
 
@@ -538,12 +711,39 @@ class UnitreeG1Dataset(BaseDataset):
             mode="w+",
             shape=(num_samples, grf_dim),
         )
-        arrays["y_center_of_mass"] = np.memmap(
-            Path(self.processed_dir) / "y_center_of_mass.npy",
+        arrays["y_base_velocity"] = np.memmap(
+            Path(self.processed_dir) / "y_base_velocity.npy",
             dtype=np.float32,
             mode="w+",
             shape=(num_samples, 6),
         )
+        arrays["y_total_ground_reaction_force"] = np.memmap(
+            Path(self.processed_dir) / "y_total_ground_reaction_force.npy",
+            dtype=np.float32,
+            mode="w+",
+            shape=(num_samples, 3),
+        )
+        arrays["y_base_angular_acceleration"] = np.memmap(
+            Path(self.processed_dir) / "y_base_angular_acceleration.npy",
+            dtype=np.float32,
+            mode="w+",
+            shape=(num_samples, 3),
+        )
+
+        num_joints = int(self.node_counts.get("joint", 0))
+        arrays["y_joint_acceleration"] = np.memmap(
+            Path(self.processed_dir) / "y_joint_acceleration.npy",
+            dtype=np.float32,
+            mode="w+",
+            shape=(num_samples, num_joints),
+        )
+        if has_joint_friction:
+            arrays["y_joint_friction"] = np.memmap(
+                Path(self.processed_dir) / "y_joint_friction.npy",
+                dtype=np.float32,
+                mode="w+",
+                shape=(num_samples, num_joints),
+            )
         arrays["sample_lut"] = np.memmap(
             Path(self.processed_dir) / "sample_lut.npy",
             dtype=np.int32,
@@ -552,10 +752,16 @@ class UnitreeG1Dataset(BaseDataset):
         )
 
         self.logger.info(
-            "Allocated target arrays: y_contact=%s | y_grf=%s | y_com=%s | sample_lut=%s",
+            "Allocated target arrays: y_contact=%s | y_grf=%s | y_base_vel=%s | "
+            "y_total_grf=%s | y_base_ang_acc=%s | y_joint_acc=%s | "
+            "y_joint_friction=%s | sample_lut=%s",
             (num_samples, contact_dim),
             (num_samples, grf_dim),
             (num_samples, 6),
+            (num_samples, 3),
+            (num_samples, 3),
+            (num_samples, num_joints),
+            (num_samples, num_joints) if has_joint_friction else None,
             (num_samples, 3),
         )
 
@@ -568,6 +774,13 @@ class UnitreeG1Dataset(BaseDataset):
             manifest_data = json.loads(self.processed_data_path.read_text())
         else:
             manifest_data = manifest
+
+        manifest_version = int(manifest_data.get("version", 0))
+        if manifest_version != self.PROCESSED_CACHE_VERSION:
+            raise ValueError(
+                "Processed cache version mismatch. "
+                f"Expected {self.PROCESSED_CACHE_VERSION}, got {manifest_version}."
+            )
 
         base_num_samples = int(manifest_data["num_samples"])
         manifest_dims = {
@@ -632,6 +845,22 @@ class UnitreeG1Dataset(BaseDataset):
         _imu_acc_key = "imu_lin_acc" if "imu_lin_acc" in raw_fields else "imu_lin_acc_b"
         _imu_vel_key = "imu_ang_vel" if "imu_ang_vel" in raw_fields else "imu_ang_vel_b"
 
+        base_frame_fields = {
+            "contact_forces": ("contact_forces_b", "contact_forces"),
+            "foot_pos": ("foot_pos_b", "foot_pos_w"),
+            "foot_lin_vel": ("foot_lin_vel_b", "foot_lin_vel_w"),
+            "base_lin_vel": ("root_com_lin_vel_b", "root_com_lin_vel_w"),
+            "base_ang_vel": ("root_com_ang_vel_b", "root_com_ang_vel_w"),
+        }
+        selected_keys: dict[str, str] = {}
+        for canonical_name, candidates in base_frame_fields.items():
+            selected_key = self._pick_field_key(raw_fields, candidates)
+            if selected_key is None:
+                raise ValueError(
+                    f"Missing raw field for '{canonical_name}'. Tried: {candidates}"
+                )
+            selected_keys[canonical_name] = selected_key
+
         extracted: dict[str, Any] = {
             "joint_pos": self._to_tensor(
                 raw_fields["joint_pos"][env_idx, episode_idx, start_idx:end_idx]
@@ -651,35 +880,25 @@ class UnitreeG1Dataset(BaseDataset):
             "contact_states": self._to_tensor(
                 raw_fields["contact_states"][env_idx, episode_idx, start_idx:end_idx]
             ),
-            "contact_forces": self._to_tensor(
-                raw_fields["contact_forces"][env_idx, episode_idx, start_idx:end_idx]
-            ),
-            "foot_pos_w": self._to_tensor(
-                raw_fields["foot_pos_w"][env_idx, episode_idx, start_idx:end_idx]
-            ),
-            "foot_lin_vel_w": self._to_tensor(
-                raw_fields["foot_lin_vel_w"][env_idx, episode_idx, start_idx:end_idx]
-            ),
-            "base_lin_vel": self._to_tensor(
-                raw_fields["root_com_lin_vel_w"][
-                    env_idx, episode_idx, start_idx:end_idx
-                ]
-            ),
-            "base_ang_vel": self._to_tensor(
-                raw_fields["root_com_ang_vel_w"][
-                    env_idx, episode_idx, start_idx:end_idx
-                ]
-            ),
             "joint_names": self._joint_names,
         }
 
-        if "hand_pos_w" in raw_fields:
-            extracted["hand_pos_w"] = self._to_tensor(
-                raw_fields["hand_pos_w"][env_idx, episode_idx, start_idx:end_idx]
+        for canonical_name, selected_key in selected_keys.items():
+            extracted[canonical_name] = self._to_tensor(
+                raw_fields[selected_key][env_idx, episode_idx, start_idx:end_idx]
             )
-        if "hand_lin_vel_w" in raw_fields:
-            extracted["hand_lin_vel_w"] = self._to_tensor(
-                raw_fields["hand_lin_vel_w"][
+
+        hand_pos_key = self._pick_field_key(raw_fields, ("hand_pos_b", "hand_pos_w"))
+        hand_lin_vel_key = self._pick_field_key(
+            raw_fields, ("hand_lin_vel_b", "hand_lin_vel_w")
+        )
+        if hand_pos_key is not None:
+            extracted["hand_pos"] = self._to_tensor(
+                raw_fields[hand_pos_key][env_idx, episode_idx, start_idx:end_idx]
+            )
+        if hand_lin_vel_key is not None:
+            extracted["hand_lin_vel"] = self._to_tensor(
+                raw_fields[hand_lin_vel_key][
                     env_idx,
                     episode_idx,
                     start_idx:end_idx,
@@ -687,6 +906,98 @@ class UnitreeG1Dataset(BaseDataset):
             )
 
         return extracted
+
+    @staticmethod
+    def _pick_field_key(
+        raw_fields: dict[str, np.ndarray], candidates: tuple[str, ...]
+    ) -> str | None:
+        for candidate in candidates:
+            if candidate in raw_fields:
+                return candidate
+        return None
+
+    def _extract_targets(
+        self,
+        raw_fields: dict[str, np.ndarray],
+        env_idx: int,
+        episode_idx: int,
+        time_idx: int,
+    ) -> dict[str, np.ndarray]:
+        """Derive single-step targets, preferring raw simulator fields when present."""
+        num_steps = int(raw_fields["joint_vel"].shape[2])
+        if time_idx > 0:
+            prev_idx, cur_idx = time_idx - 1, time_idx
+        else:
+            prev_idx, cur_idx = 0, min(1, num_steps - 1)
+        denominator = self.control_dt if cur_idx != prev_idx else 1.0
+
+        total_grf_key = self._pick_field_key(
+            raw_fields,
+            (
+                "total_grf_b",
+                "total_ground_reaction_force_b",
+                "total_grf",
+                "total_ground_reaction_force",
+            ),
+        )
+        if total_grf_key is not None:
+            total_grf = raw_fields[total_grf_key][env_idx, episode_idx, time_idx]
+        else:
+            contact_forces_key = self._pick_field_key(
+                raw_fields, ("contact_forces_b", "contact_forces")
+            )
+            if contact_forces_key is None:
+                raise ValueError("Cannot derive total GRF: missing contact_forces field.")
+            contact_forces = np.asarray(
+                raw_fields[contact_forces_key][env_idx, episode_idx, time_idx],
+                dtype=np.float32,
+            )
+            total_grf = contact_forces.sum(axis=0)
+
+        base_ang_acc_key = self._pick_field_key(
+            raw_fields, ("base_ang_acc", "base_ang_acc_b", "imu_ang_acc_b")
+        )
+        if base_ang_acc_key is not None:
+            base_ang_acc = raw_fields[base_ang_acc_key][env_idx, episode_idx, time_idx]
+        else:
+            imu_ang_vel_key = self._pick_field_key(
+                raw_fields, ("imu_ang_vel", "imu_ang_vel_b")
+            )
+            if imu_ang_vel_key is None:
+                raise ValueError(
+                    "Cannot derive base angular acceleration: missing imu_ang_vel field."
+                )
+            imu_ang_vel = raw_fields[imu_ang_vel_key]
+            base_ang_acc = (
+                imu_ang_vel[env_idx, episode_idx, cur_idx]
+                - imu_ang_vel[env_idx, episode_idx, prev_idx]
+            ) / denominator
+
+        if "joint_acc" in raw_fields:
+            joint_acc = raw_fields["joint_acc"][env_idx, episode_idx, time_idx]
+        else:
+            joint_vel = raw_fields["joint_vel"]
+            joint_acc = (
+                joint_vel[env_idx, episode_idx, cur_idx]
+                - joint_vel[env_idx, episode_idx, prev_idx]
+            ) / denominator
+
+        targets = {
+            "total_ground_reaction_force": np.asarray(total_grf, dtype=np.float32),
+            "base_angular_acceleration": np.asarray(base_ang_acc, dtype=np.float32),
+            "joint_acceleration": np.asarray(joint_acc, dtype=np.float32),
+        }
+
+        joint_friction_key = self._pick_field_key(
+            raw_fields, ("joint_friction", "joint_friction_torque")
+        )
+        if joint_friction_key is not None:
+            targets["joint_friction"] = np.asarray(
+                raw_fields[joint_friction_key][env_idx, episode_idx, time_idx],
+                dtype=np.float32,
+            )
+
+        return targets
 
     def _extract_features(
         self,

@@ -65,7 +65,11 @@ class MS_HGNN(BaseModel):
         self.hidden_channels = train_config.hidden_channels
         self.num_layers = train_config.num_layers
         self.activation = train_config.activation
-        self.output_type = train_config.output_type
+        if train_config.output_types:
+            self.output_types = list(train_config.output_types)
+        else:
+            self.output_types = [train_config.output_type]
+        self.output_type = self.output_types[0]
 
         # Get node and edge information from spec
         node_types_dict = self.spec.node_types_with_history(
@@ -120,14 +124,20 @@ class MS_HGNN(BaseModel):
             nn.Linear(self.hidden_channels, self.hidden_channels),
         )
 
-        # ===== DECODER =====
-        # Determine which node type to decode from (based on output_type)
-        # Each output type knows which node type should produce predictions
-        self.output_node_type = self.spec.output_node_type(self.output_type)
-
-        # Each output type knows its output dimension
-        output_dim = self.spec.output_channels(self.output_type)
-        self.decoder = nn.Linear(self.hidden_channels, output_dim)
+        # ===== DECODERS (one head per task) =====
+        self.output_node_types = {
+            output_type: self.spec.output_node_type(output_type)
+            for output_type in self.output_types
+        }
+        self.decoders = nn.ModuleDict(
+            {
+                output_type.value: nn.Linear(
+                    self.hidden_channels,
+                    self.spec.output_channels(output_type),
+                )
+                for output_type in self.output_types
+            }
+        )
 
     @classmethod
     def build_from(cls, train_config: TrainConfig, spec: BaseSpec) -> Self:
@@ -197,15 +207,12 @@ class MS_HGNN(BaseModel):
                 for key in x_dict_new
             }
 
-        # ===== DECODER: Project to output =====
-        # Extract features for the output node type (e.g., "foot" for CONTACT)
-        output_node_features = x_dict[self.output_node_type]
-
-        # Decode to output dimension
-        out = self.decoder(output_node_features)  # [num_output_nodes, output_dim]
-
-        # Return as dict with output type as key
-        return {self.output_type: out}
+        # ===== DECODERS: one head per output type =====
+        outputs: dict[OutputType, torch.Tensor] = {}
+        for output_type in self.output_types:
+            node_features = x_dict[self.output_node_types[output_type]]
+            outputs[output_type] = self.decoders[output_type.value](node_features)
+        return outputs
 
 
 BaseModel.register(ModelType.MS_HGNN)(MS_HGNN)  # type: ignore[arg-type]

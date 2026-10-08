@@ -58,6 +58,7 @@ class BaseParser(ABC):
         model_type: ModelType,
         spec: BaseSpec,
         parser_path: Path,
+        symmetry_edges: bool | None = None,
     ) -> Self:
         """
         Factory method to create a parser by file type and robot type.
@@ -83,12 +84,16 @@ class BaseParser(ABC):
             )
 
         parser_cls: Self = cls._registry[key]
-        return parser_cls.build_from(model_type, spec, parser_path)
+        return parser_cls.build_from(model_type, spec, parser_path, symmetry_edges)
 
     @classmethod
     @abstractmethod
     def build_from(
-        cls, model_type: ModelType, spec: BaseSpec, parser_path: Path
+        cls,
+        model_type: ModelType,
+        spec: BaseSpec,
+        parser_path: Path,
+        symmetry_edges: bool | None = None,
     ) -> Self:
         """
         Factory constructor. REQUIRED - each child implements this.

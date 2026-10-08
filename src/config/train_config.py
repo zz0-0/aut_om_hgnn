@@ -29,7 +29,7 @@ class TrainConfig:
     model_type: ModelType
     spec_type: SpecType
     robot_type: RobotType
-    output_type: OutputType  # Output type to train/predict
+    output_type: OutputType  # Primary output type (also first entry of output_types)
     symmetry_type: (
         SymmetryType  # Symmetry type for data augmentation (e.g., C2, S4, K4)
     )
@@ -64,6 +64,10 @@ class TrainConfig:
     foot_contact_area: Optional[float] = None
     gradient_clip_val: Optional[float] = 1.0
     gradient_clip_algorithm: str = "norm"
+    symmetry_edges: Optional[bool] = None
+    symmetry_augmentation: Optional[bool] = None
+    output_types: Optional[list[OutputType]] = None
+    loss_weights: Optional[dict[str, float]] = None
 
     @classmethod
     def build_from(cls, config_path: str) -> Self:
@@ -85,6 +89,12 @@ class TrainConfig:
             config_dict = yaml.safe_load(f)
 
         output_type = OutputType[config_dict["output_type"]]
+        output_types_raw = config_dict.get("output_types")
+        output_types = (
+            [OutputType[name] for name in output_types_raw]
+            if output_types_raw is not None
+            else None
+        )
 
         activation_str = config_dict.get("activation")
         if activation_str == "ReLU":
@@ -111,6 +121,7 @@ class TrainConfig:
             spec_type=SpecType[config_dict["spec_type"]],
             robot_type=RobotType[config_dict["robot_type"]],
             output_type=output_type,
+            output_types=output_types,
             symmetry_type=symmetry_type,
             parser_path=Path(config_dict["parser_path"]),
             dataset_path=Path(config_dict["dataset_path"]),
@@ -138,4 +149,14 @@ class TrainConfig:
             resume_from_checkpoint=config_dict.get("resume_from_checkpoint", None),
             robot_mass=config_dict.get("robot_mass", None),
             foot_contact_area=config_dict.get("foot_contact_area", None),
+            symmetry_edges=config_dict.get("symmetry_edges", None),
+            symmetry_augmentation=config_dict.get("symmetry_augmentation", None),
+            loss_weights=(
+                {
+                    str(key): float(value)
+                    for key, value in config_dict["loss_weights"].items()
+                }
+                if config_dict.get("loss_weights") is not None
+                else None
+            ),
         )

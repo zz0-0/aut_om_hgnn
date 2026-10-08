@@ -142,7 +142,7 @@ class BaseDataset(ABC, Dataset):
         - HeteroData with:
             - x_dict: {node_type: feature_tensor}
             - edge_index_dict: {edge_tuple: edge_indices}
-            - y_contact_states, y_contact_forces, y_com: labels
+            - y_contact, y_ground_reaction_force, y_base_velocity: labels
         """
         pass
 

@@ -6,10 +6,11 @@ import torch
 
 from src.graph.spec.bhmg import BHMGNodeType
 from src.graph.morphology.base_morphology import RobotMorphology
-from src.graph.spec.base_spec import BaseSpec
-from src.config.train_enum import ModelType, RobotType
+from src.graph.spec.base_spec import BaseSpec, symmetry_permutation_dict_type
+from src.config.train_enum import ModelType, RobotType, SymmetryType
 from src.config.batch_schema import edge_index_dict_type
 from src.graph.parser.base_parser import BaseParser
+from src.graph.parser.symmetry_utils import build_name_permutation, left_right_partner
 
 
 class UnitreeG129DOFUSDParser(BaseParser):
@@ -36,7 +37,13 @@ class UnitreeG129DOFUSDParser(BaseParser):
     - Hands: child links of wrist joints (contains "hand" or "wrist" in name)
     """
 
-    def __init__(self, model_type: ModelType, spec: BaseSpec, parser_path: Path):
+    def __init__(
+        self,
+        model_type: ModelType,
+        spec: BaseSpec,
+        parser_path: Path,
+        symmetry_edges: bool | None = None,
+    ):
         """
         Initialize USD parser.
 
@@ -49,11 +56,20 @@ class UnitreeG129DOFUSDParser(BaseParser):
         self.model_type = model_type
         self.spec = spec
         self.parser_path = Path(parser_path)
+        self.symmetry_edges = (
+            model_type == ModelType.MS_HGNN
+            if symmetry_edges is None
+            else symmetry_edges
+        )
         self.physics_path = self.find_physics_usd_path()
 
     @classmethod
     def build_from(
-        cls, model_type: ModelType, spec: BaseSpec, parser_path: Path
+        cls,
+        model_type: ModelType,
+        spec: BaseSpec,
+        parser_path: Path,
+        symmetry_edges: bool | None = None,
     ) -> Self:
         """
         Factory constructor for USDParser.
@@ -70,7 +86,7 @@ class UnitreeG129DOFUSDParser(BaseParser):
         parser = USDParser.build_from(spec, "usd/g1_29dof_rev_1_0.usd")
         morphology = parser.parse()
         """
-        return cls(model_type, spec, parser_path)
+        return cls(model_type, spec, parser_path, symmetry_edges)
 
     def find_physics_usd_path(self) -> Path:
         """
@@ -139,11 +155,18 @@ class UnitreeG129DOFUSDParser(BaseParser):
             )
 
         node_type_usd_node_dict = self._extract_usd_to_node_types(physics_stage)  # type: ignore
+        self._node_type_usd_node_dict = node_type_usd_node_dict
+        self._symmetry_permutation_dict = self._build_symmetry_permutation_dict(
+            node_type_usd_node_dict
+        )
         node_type_usd_node_index_dict = self._build_index_dict(node_type_usd_node_dict)
         edge_index_dict = self._build_edge_index_dict(node_type_usd_node_index_dict)
 
         morphology = RobotMorphology(
-            node_type_usd_node_dict, node_type_usd_node_index_dict, edge_index_dict
+            node_type_usd_node_dict,
+            node_type_usd_node_index_dict,
+            edge_index_dict,
+            self._symmetry_permutation_dict,
         )
         return morphology
 
@@ -229,7 +252,33 @@ class UnitreeG129DOFUSDParser(BaseParser):
                     f"Children: {children}"
                 )
 
+        self._joint_parent_map = joint_parent_map
+        self._joint_children_map = joint_children_map
+        self._root_joints = [
+            joint_name
+            for joint_name in self.joint_names
+            if joint_parent_map[joint_name] is None
+        ]
+
         return node_type
+
+    def _build_symmetry_permutation_dict(
+        self, node_type_usd_node_dict: dict[str, list[str]]
+    ) -> symmetry_permutation_dict_type:
+        """Build left-right row permutations from node names for each node type."""
+        per_node_type: dict[str, dict[str, list[int]]] = {}
+        for node_type in (
+            BHMGNodeType.JOINT.value,
+            BHMGNodeType.FOOT.value,
+            BHMGNodeType.HAND.value,
+        ):
+            names = node_type_usd_node_dict.get(node_type, [])
+            if not names:
+                continue
+            per_node_type[node_type] = {
+                "gs": build_name_permutation(names, left_right_partner)
+            }
+        return {SymmetryType.C2.value: per_node_type}
 
     def _build_index_dict(
         self, node_type_usd_node_dict: dict[str, list[str]]
@@ -244,19 +293,129 @@ class UnitreeG129DOFUSDParser(BaseParser):
     ) -> edge_index_dict_type:
         edge_index_dict: edge_index_dict_type = {}
 
-        for edge_type, node_pairs in self.spec.node_edge_relations().items():
-            if edge_type == "connect":
-                for source_node_type, target_node_type in node_pairs:
-                    edge_key = (source_node_type, edge_type, target_node_type)
-                    source_indices = node_type_index_dict[source_node_type]
-                    target_indices = node_type_index_dict[target_node_type]
+        node_names = self._node_type_usd_node_dict
+        base_names = node_names.get(BHMGNodeType.BASE.value, [])
+        joint_names = node_names.get(BHMGNodeType.JOINT.value, [])
+        foot_names = node_names.get(BHMGNodeType.FOOT.value, [])
+        hand_names = node_names.get(BHMGNodeType.HAND.value, [])
 
+        joint_index_by_name = {name: idx for idx, name in enumerate(joint_names)}
+        foot_index_by_name = {name: idx for idx, name in enumerate(foot_names)}
+        hand_index_by_name = {name: idx for idx, name in enumerate(hand_names)}
+
+        parent_map = getattr(self, "_joint_parent_map", {})
+        children_map = getattr(self, "_joint_children_map", {})
+        root_joints = getattr(self, "_root_joints", [])
+
+        base_children = [
+            child
+            for base_name in base_names
+            for child in children_map.get(base_name, [])
+            if child in joint_index_by_name
+        ]
+        sibling_roots = [
+            name
+            for name in root_joints
+            if name not in base_names and name in joint_index_by_name
+        ]
+        base_to_joint_names = base_children + sibling_roots
+
+        joint_to_joint_src: list[int] = []
+        joint_to_joint_dst: list[int] = []
+        for child_joint, parent_joint in parent_map.items():
+            if (
+                child_joint in joint_index_by_name
+                and parent_joint in joint_index_by_name
+            ):
+                joint_to_joint_src.append(joint_index_by_name[parent_joint])
+                joint_to_joint_dst.append(joint_index_by_name[child_joint])
+
+        joint_to_foot_src: list[int] = []
+        joint_to_foot_dst: list[int] = []
+        for foot_joint in foot_names:
+            parent_joint = parent_map.get(foot_joint)
+            if parent_joint in joint_index_by_name and foot_joint in foot_index_by_name:
+                joint_to_foot_src.append(joint_index_by_name[parent_joint])
+                joint_to_foot_dst.append(foot_index_by_name[foot_joint])
+
+        joint_to_hand_src: list[int] = []
+        joint_to_hand_dst: list[int] = []
+        for hand_joint in hand_names:
+            parent_joint = parent_map.get(hand_joint)
+            if parent_joint in joint_index_by_name and hand_joint in hand_index_by_name:
+                joint_to_hand_src.append(joint_index_by_name[parent_joint])
+                joint_to_hand_dst.append(hand_index_by_name[hand_joint])
+
+        for edge_type, node_pairs in self.spec.node_edge_relations().items():
+            if edge_type != "connect":
+                continue
+            for source_node_type, target_node_type in node_pairs:
+                edge_key = (source_node_type, edge_type, target_node_type)
+                node_pair_types = (source_node_type, target_node_type)
+
+                if node_pair_types == (
+                    BHMGNodeType.BASE.value,
+                    BHMGNodeType.JOINT.value,
+                ):
+                    edge_index_dict[edge_key] = self._edge_index_from_pairs(
+                        [0] * len(base_to_joint_names),
+                        [joint_index_by_name[name] for name in base_to_joint_names],
+                    )
+                elif node_pair_types == (
+                    BHMGNodeType.JOINT.value,
+                    BHMGNodeType.BASE.value,
+                ):
+                    edge_index_dict[edge_key] = self._edge_index_from_pairs(
+                        [joint_index_by_name[name] for name in base_to_joint_names],
+                        [0] * len(base_to_joint_names),
+                    )
+                elif node_pair_types == (
+                    BHMGNodeType.JOINT.value,
+                    BHMGNodeType.JOINT.value,
+                ):
+                    edge_index_dict[edge_key] = self._edge_index_from_pairs(
+                        joint_to_joint_src,
+                        joint_to_joint_dst,
+                    )
+                elif node_pair_types == (
+                    BHMGNodeType.JOINT.value,
+                    BHMGNodeType.FOOT.value,
+                ):
+                    edge_index_dict[edge_key] = self._edge_index_from_pairs(
+                        joint_to_foot_src,
+                        joint_to_foot_dst,
+                    )
+                elif node_pair_types == (
+                    BHMGNodeType.FOOT.value,
+                    BHMGNodeType.JOINT.value,
+                ):
+                    edge_index_dict[edge_key] = self._edge_index_from_pairs(
+                        list(joint_to_foot_dst),
+                        list(joint_to_foot_src),
+                    )
+                elif node_pair_types == (
+                    BHMGNodeType.JOINT.value,
+                    BHMGNodeType.HAND.value,
+                ):
+                    edge_index_dict[edge_key] = self._edge_index_from_pairs(
+                        joint_to_hand_src,
+                        joint_to_hand_dst,
+                    )
+                elif node_pair_types == (
+                    BHMGNodeType.HAND.value,
+                    BHMGNodeType.JOINT.value,
+                ):
+                    edge_index_dict[edge_key] = self._edge_index_from_pairs(
+                        list(joint_to_hand_dst),
+                        list(joint_to_hand_src),
+                    )
+                else:
                     edge_index_dict[edge_key] = self._pair_to_edge_index(
-                        source_indices,
-                        target_indices,
+                        node_type_index_dict[source_node_type],
+                        node_type_index_dict[target_node_type],
                     )
 
-        if self.model_type == ModelType.MS_HGNN:
+        if self.symmetry_edges:
             for (
                 edge_type,
                 node_pairs,
@@ -267,7 +426,7 @@ class UnitreeG129DOFUSDParser(BaseParser):
                     target_indices = node_type_index_dict[target_node_type]
 
                     group_permutation = (
-                        self._resolve_group_permutation_from_spec(
+                        self._resolve_group_permutation(
                             source_node_type, edge_type
                         )
                         if source_node_type == target_node_type
@@ -298,6 +457,23 @@ class UnitreeG129DOFUSDParser(BaseParser):
                         )
 
         return edge_index_dict
+
+    def _resolve_group_permutation(
+        self,
+        node_type: str,
+        edge_type: str,
+    ) -> list[int] | None:
+        """Resolve permutations from name-based morphology, falling back to spec."""
+        mapping = getattr(self, "_symmetry_permutation_dict", None)
+        if mapping:
+            for per_symmetry in mapping.values():
+                node_mapping = per_symmetry.get(node_type)
+                if node_mapping is None:
+                    continue
+                permutation = node_mapping.get(edge_type)
+                if permutation is not None and len(permutation) > 0:
+                    return permutation
+        return self._resolve_group_permutation_from_spec(node_type, edge_type)
 
     def _resolve_group_permutation_from_spec(
         self,

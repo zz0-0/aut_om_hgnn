@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 
 from src.config.batch_schema import edge_index_dict_type
+from src.graph.spec.base_spec import symmetry_permutation_dict_type
 
 
 @dataclass
@@ -23,3 +24,11 @@ class RobotMorphology:
 
     edge_index_dict: edge_index_dict_type
     """Edge connectivity: {(src_type, edge_type, dst_type): (2, num_edges)}"""
+
+    symmetry_permutation_dict: symmetry_permutation_dict_type | None = None
+    """Name-resolved symmetry row permutations for this robot instance.
+
+    Rows are permuted with ``new_row[i] = old_row[permutation[i]]``. A permutation
+    length equal to the number of rows encodes a full per-node permutation; shorter
+    lengths are interpreted as contiguous row-group permutations.
+    """
