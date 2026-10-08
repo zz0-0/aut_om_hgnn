@@ -172,8 +172,10 @@ causal history buffer, and produces estimates for all heads. We report:
   by repeating the first frame) and the resulting output lag.
 
 Representative measured numbers (single RTX 5080, batch 1, H = 150): inference
-1.4–3.2 ms mean, P95 ≤ 3.9 ms, comfortably below the 20 ms control budget with
-no deadline misses.
+1.4–3.2 ms mean, P95 ≤ 4.0 ms, comfortably below the 20 ms control budget with
+no deadline misses. Metric accumulation excludes the H−1-step history warm-up
+after startup and after each episode reset, so online accuracy is reported for
+the estimator in steady state.
 
 ### (d) Hardware: what we can and cannot claim
 
@@ -333,8 +335,10 @@ numbering/table references are fixed.
   0.070 → 0.075, base angular acceleration 6.8 → 7.1, joint acceleration
   77 → 83).
 - Sim-online validation: no control-deadline misses; batch-1 inference
-  1.4–3.2 ms mean, P95 ≤ 3.9 ms at 50 Hz (20 ms budget), over 1,500 control
-  steps against simulator ground truth.
+  1.4–3.2 ms mean, P95 ≤ 4.0 ms at 50 Hz (20 ms budget), over 1,500 control
+  steps against simulator ground truth. H = 150 improves online accuracy over
+  H = 1 (e.g., G1 base-velocity RMSE 0.217 vs 0.315; Go2 0.073 vs 0.097) for
+  at most ~0.4 ms additional latency.
 
 ## Evidence boundary
 

@@ -57,11 +57,11 @@ run_case() {
 
 echo "[online] starting online validation"
 
-for stem in g1_bhmg_multi_mi_150 g1_bhmg_multi_ms_150; do
+for stem in g1_bhmg_multi_mi_150 g1_bhmg_multi_ms_150 g1_bhmg_multi_mi_nohist g1_bhmg_multi_ms_nohist; do
     run_case "$stem" "$G1_TASK" internal --policy_checkpoint "$G1_CKPT" --external_action_scale 0.25
 done
 
-for stem in go2_qhmg_multi_mi_150 go2_qhmg_multi_ms_150; do
+for stem in go2_qhmg_multi_mi_150 go2_qhmg_multi_ms_150 go2_qhmg_multi_mi_nohist go2_qhmg_multi_ms_nohist; do
     run_case "$stem" "$GO2_TASK" internal --policy_checkpoint "$GO2_CKPT" --external_action_scale 0.25
 done
 

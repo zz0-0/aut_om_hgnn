@@ -1,0 +1,51 @@
+{
+  "task": "Go2-Rough-Locomotion-Dataset-v0",
+  "gnn_config": "/home/ryz5920/Github Project/aut_om_hgnn/src/config/yaml/go2_qhmg_multi_mi_nohist.yaml",
+  "gnn_checkpoint": "/home/ryz5920/Github Project/aut_om_hgnn/checkpoints/all_configs_seed_sweep/go2_qhmg_multi_mi_nohist/go2_qhmg_multi_mi_nohist_seed00/epoch=18-val_total_loss=1.30.ckpt",
+  "policy": "/home/ryz5920/Project/archive/aut_unitree_isaaclab_v1/scripts/reinforcement_learning/rsl_rl/logs/rsl_rl/go2_rough/2026-01-15_08-44-46/model_2999.pt",
+  "steps": 1500,
+  "num_envs": 1,
+  "control_dt_s": 0.02,
+  "metrics_warmup_steps": 0,
+  "episode_resets": 1,
+  "metrics": {
+    "CONTACT": {
+      "mae": 0.031745262554061904,
+      "rmse": 0.12938092404220283,
+      "accuracy": 0.9782758620689656
+    },
+    "GROUND_REACTION_FORCE": {
+      "mae": 2.414696852146894,
+      "rmse": 5.294483028419747
+    },
+    "BASE_VELOCITY": {
+      "mae": 0.05553283735467442,
+      "rmse": 0.0964830051226574
+    },
+    "TOTAL_GROUND_REACTION_FORCE": {
+      "mae": 9.914324561837075,
+      "rmse": 15.754646346528796
+    },
+    "BASE_ANGULAR_ACCELERATION": {
+      "mae": 42.141093996749525,
+      "rmse": 62.67138485995711
+    },
+    "JOINT_ACCELERATION": {
+      "mae": 44.803968786919256,
+      "rmse": 110.92084016820532
+    },
+    "JOINT_FRICTION": {
+      "mae": 0.08029525745874164,
+      "rmse": 0.10270683320686426
+    }
+  },
+  "latency_ms": {
+    "infer_mean": 1.4299414632841945,
+    "infer_p50": 1.352560007944703,
+    "infer_p95": 2.0345280296169217,
+    "infer_max": 3.486375091597438,
+    "frame_mean": 1.0610350679028138,
+    "frame_p95": 1.3921200181357563,
+    "deadline_misses": 0
+  }
+}
