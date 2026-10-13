@@ -215,6 +215,7 @@ def main() -> None:
             output_type,
             robot_mass=config.robot_mass,
             foot_contact_area=config.foot_contact_area,
+            joint_count=len(morphology.node_type_usd_node_dict.get("joint", [])),
         )[Stage.TEST]
         metrics_by_task[output_type] = {
             name: metric.to(device) for name, metric in task_metrics.items()

@@ -47,67 +47,69 @@ class AxisMetric(Metric):
         self.base_metric.reset()
 
 
-class PerFootMetric(Metric):
+class PerElementMetric(Metric):
     """
-    Wrapper metric that computes a metric for a single foot index.
+    Wrapper metric that computes a metric for a single element of a fixed-size
+    node group (e.g., one foot among the contact nodes, or one joint among the
+    joint nodes).
 
-    Supports flattened contact tensors (1D) and flattened GRF tensors (2D with last
-    dim = output channels, e.g., 3 for x/y/z).
+    Supports flattened tensors (1D) and tensors with a trailing channel
+    dimension (2D, e.g., 3 for x/y/z forces).
     """
 
-    def __init__(self, base_metric: Metric, foot_index: int, num_feet: int):
+    def __init__(self, base_metric: Metric, element_index: int, num_elements: int):
         super().__init__()
-        if num_feet < 1:
-            raise ValueError(f"num_feet must be >= 1, got {num_feet}")
-        if foot_index < 0 or foot_index >= num_feet:
+        if num_elements < 1:
+            raise ValueError(f"num_elements must be >= 1, got {num_elements}")
+        if element_index < 0 or element_index >= num_elements:
             raise ValueError(
-                f"foot_index must be in [0, {num_feet - 1}], got {foot_index}"
+                f"element_index must be in [0, {num_elements - 1}], got {element_index}"
             )
         self.base_metric = base_metric
-        self.foot_index = foot_index
-        self.num_feet = num_feet
+        self.element_index = element_index
+        self.num_elements = num_elements
 
     def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
-        """Update metric with the selected foot slice."""
+        """Update metric with the selected element slice."""
         if preds.shape != target.shape:
             raise ValueError(
-                f"Prediction/target shape mismatch for PerFootMetric: "
+                f"Prediction/target shape mismatch for PerElementMetric: "
                 f"{tuple(preds.shape)} != {tuple(target.shape)}"
             )
 
         if preds.ndim == 1:
-            # Contact path after flatten: [batch_size * num_feet]
-            if preds.numel() % self.num_feet != 0:
+            # Scalar-per-node path after flatten: [batch_size * num_elements]
+            if preds.numel() % self.num_elements != 0:
                 raise ValueError(
                     f"Cannot reshape 1D tensor of length {preds.numel()} into "
-                    f"num_feet={self.num_feet}"
+                    f"num_elements={self.num_elements}"
                 )
-            preds_per_foot = preds.reshape(-1, self.num_feet)
-            target_per_foot = target.reshape(-1, self.num_feet)
+            preds_per_element = preds.reshape(-1, self.num_elements)
+            target_per_element = target.reshape(-1, self.num_elements)
             self.base_metric.update(  # type: ignore
-                preds_per_foot[:, self.foot_index].contiguous(),
-                target_per_foot[:, self.foot_index].contiguous(),
+                preds_per_element[:, self.element_index].contiguous(),
+                target_per_element[:, self.element_index].contiguous(),
             )
             return
 
         if preds.ndim == 2:
-            # GRF path after reshape: [batch_size * num_feet, channels]
-            if preds.shape[0] % self.num_feet != 0:
+            # Vector-per-node path after reshape: [batch_size * num_elements, channels]
+            if preds.shape[0] % self.num_elements != 0:
                 raise ValueError(
                     f"Cannot reshape first dim {preds.shape[0]} into "
-                    f"num_feet={self.num_feet}"
+                    f"num_elements={self.num_elements}"
                 )
             channels = preds.shape[1]
-            preds_per_foot = preds.reshape(-1, self.num_feet, channels)
-            target_per_foot = target.reshape(-1, self.num_feet, channels)
+            preds_per_element = preds.reshape(-1, self.num_elements, channels)
+            target_per_element = target.reshape(-1, self.num_elements, channels)
             self.base_metric.update(  # type: ignore
-                preds_per_foot[:, self.foot_index, :].contiguous(),
-                target_per_foot[:, self.foot_index, :].contiguous(),
+                preds_per_element[:, self.element_index, :].contiguous(),
+                target_per_element[:, self.element_index, :].contiguous(),
             )
             return
 
         raise ValueError(
-            f"Unsupported tensor rank for PerFootMetric: preds.ndim={preds.ndim}"
+            f"Unsupported tensor rank for PerElementMetric: preds.ndim={preds.ndim}"
         )
 
     def compute(self) -> torch.Tensor:
@@ -592,6 +594,7 @@ class BaseSpec(ABC):
         output_type: OutputType,
         robot_mass: Optional[float] = None,
         foot_contact_area: Optional[float] = None,
+        joint_count: Optional[int] = None,
     ) -> dict[Stage, dict[str, Metric]]:
         """
         Return appropriate metric functions for this output type.
@@ -600,6 +603,8 @@ class BaseSpec(ABC):
             - output_type: Type of output to create metrics for
             - robot_mass: Robot mass in kg for weight-normalized GRF metrics
             - foot_contact_area: One-foot contact area in m^2 for area-normalized GRF metrics
+            - joint_count: Number of joint nodes; when provided, per-joint metrics
+              are added for joint acceleration/friction
 
         OUTPUT:
             - Dict mapping:
@@ -619,22 +624,22 @@ class BaseSpec(ABC):
 
             num_feet = self._infer_foot_node_count()
             for foot_idx in range(num_feet):
-                base_metrics[f"accuracy_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"accuracy_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.Accuracy(task="binary"), foot_idx, num_feet
                 )
-                base_metrics[f"precision_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"precision_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.Precision(task="binary"), foot_idx, num_feet
                 )
-                base_metrics[f"recall_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"recall_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.Recall(task="binary"), foot_idx, num_feet
                 )
-                base_metrics[f"f1_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"f1_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.F1Score(task="binary"), foot_idx, num_feet
                 )
-                base_metrics[f"specificity_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"specificity_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.Specificity(task="binary"), foot_idx, num_feet
                 )
-                base_metrics[f"mcc_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"mcc_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.MatthewsCorrCoef(task="binary"), foot_idx, num_feet
                 )
 
@@ -675,37 +680,37 @@ class BaseSpec(ABC):
             # Per-foot metrics
             num_feet = self._infer_foot_node_count()
             for foot_idx in range(num_feet):
-                base_metrics[f"mae_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"mae_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.MeanAbsoluteError(), foot_idx, num_feet
                 )
-                base_metrics[f"mse_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"mse_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.MeanSquaredError(), foot_idx, num_feet
                 )
-                base_metrics[f"rmse_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"rmse_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.MeanSquaredError(squared=False), foot_idx, num_feet
                 )
-                base_metrics[f"r2_score_foot_{foot_idx}"] = PerFootMetric(
+                base_metrics[f"r2_score_foot_{foot_idx}"] = PerElementMetric(
                     torchmetrics.R2Score(), foot_idx, num_feet
                 )
                 for i, axis in enumerate(axis_names):
-                    base_metrics[f"mae_{axis}_foot_{foot_idx}"] = PerFootMetric(
+                    base_metrics[f"mae_{axis}_foot_{foot_idx}"] = PerElementMetric(
                         AxisMetric(torchmetrics.MeanAbsoluteError(), axis=i),
                         foot_idx,
                         num_feet,
                     )
-                    base_metrics[f"mse_{axis}_foot_{foot_idx}"] = PerFootMetric(
+                    base_metrics[f"mse_{axis}_foot_{foot_idx}"] = PerElementMetric(
                         AxisMetric(torchmetrics.MeanSquaredError(), axis=i),
                         foot_idx,
                         num_feet,
                     )
-                    base_metrics[f"rmse_{axis}_foot_{foot_idx}"] = PerFootMetric(
+                    base_metrics[f"rmse_{axis}_foot_{foot_idx}"] = PerElementMetric(
                         AxisMetric(
                             torchmetrics.MeanSquaredError(squared=False), axis=i
                         ),
                         foot_idx,
                         num_feet,
                     )
-                    base_metrics[f"r2_score_{axis}_foot_{foot_idx}"] = PerFootMetric(
+                    base_metrics[f"r2_score_{axis}_foot_{foot_idx}"] = PerElementMetric(
                         AxisMetric(torchmetrics.R2Score(), axis=i),
                         foot_idx,
                         num_feet,
@@ -852,7 +857,24 @@ class BaseSpec(ABC):
             OutputType.JOINT_ACCELERATION,
             OutputType.JOINT_FRICTION,
         ):
-            return self._per_stage_metrics(self._scalar_regression_metrics())
+            base_metrics = self._scalar_regression_metrics()
+            if joint_count is not None and joint_count > 0:
+                for joint_idx in range(joint_count):
+                    base_metrics[f"mae_joint_{joint_idx}"] = PerElementMetric(
+                        torchmetrics.MeanAbsoluteError(), joint_idx, joint_count
+                    )
+                    base_metrics[f"mse_joint_{joint_idx}"] = PerElementMetric(
+                        torchmetrics.MeanSquaredError(), joint_idx, joint_count
+                    )
+                    base_metrics[f"rmse_joint_{joint_idx}"] = PerElementMetric(
+                        torchmetrics.MeanSquaredError(squared=False),
+                        joint_idx,
+                        joint_count,
+                    )
+                    base_metrics[f"r2_score_joint_{joint_idx}"] = PerElementMetric(
+                        torchmetrics.R2Score(), joint_idx, joint_count
+                    )
+            return self._per_stage_metrics(base_metrics)
 
         else:
             raise ValueError(f"Unknown output type: {output_type}")
