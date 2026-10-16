@@ -48,3 +48,6 @@ evaluation/*
 evaluation/online/*.log
 
 datasets_memmap
+
+# stray local wandb dirs
+wandb/
